@@ -1,3 +1,5 @@
-ccxt
+requests
 pandas
 pandas-ta
+numpy
+flask
