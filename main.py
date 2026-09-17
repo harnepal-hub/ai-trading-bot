@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# AMTE SYSTEM SPECIFICATION v3.0 (Native Orders)
+# AMTE SYSTEM SPECIFICATION v3.1 (Action Mode)
 # ==========================================
 PAIRS = ["B-BTC_USDT", "B-ETH_USDT", "B-SOL_USDT", "B-XRP_USDT", "B-ADA_USDT"]
 CAPITAL_INR = 100000.00
@@ -25,7 +25,7 @@ USDT_INR_RATE = 86.00
 # Institutional Fee Structure 
 MAKER_FEE = 0.00025  # 0.025% for Resting Limit Orders (Entry & TP)
 TAKER_FEE = 0.00050  # 0.050% for Market Orders (SL & Timeouts)
-SLIPPAGE_RATE = 0.0005 # 0.05% penalty only applied to Taker executions
+SLIPPAGE_RATE = 0.0005 
 
 TRADE_LOG_FILE = "amte_ledger.csv"
 TELEGRAM_BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE" 
@@ -66,7 +66,6 @@ def log_trade_to_csv(trade_data):
 class AMTEBot:
     def __init__(self, pairs):
         self.pairs = pairs
-        # State Machine: NONE -> PENDING_ENTRY -> ACTIVE -> NONE
         self.positions = {pair: {'status': 'NONE'} for pair in pairs}
         self.current_date = date.today()
         self.daily_trades = 0
@@ -84,7 +83,6 @@ class AMTEBot:
             self.current_date = today
             self.daily_trades = 0
             self.daily_pnl_inr = 0.0
-            # Cancel all pending resting orders on new day
             for p in self.positions:
                 if self.positions[p]['status'] == 'PENDING_ENTRY':
                     self.positions[p] = {'status': 'NONE'}
@@ -92,7 +90,7 @@ class AMTEBot:
 
     def run_loop(self):
         time.sleep(5)
-        send_telegram_alert("🚀 <b>AMTE Native Order Engine Live</b>\nRouting resting limit and stop-market logic.")
+        send_telegram_alert("🚀 <b>AMTE Action Mode Live</b>\nHunting 15m dips with 1H trend alignment.")
         
         while True:
             try:
@@ -102,44 +100,46 @@ class AMTEBot:
                 active_trades_count = sum(1 for p in self.positions.values() if p['status'] == 'ACTIVE')
 
                 for pair in self.pairs:
-                    df_4h = fetch_live_data(pair, "4h", 100)
+                    # Loosened Filters: 1H Macro, 15m Trigger
+                    df_macro = fetch_live_data(pair, "1h", 100)
                     time.sleep(1)
-                    df_1h = fetch_live_data(pair, "1h", 100)
+                    df_micro = fetch_live_data(pair, "15m", 100)
                     time.sleep(1)
                     
-                    if df_4h.empty or df_1h.empty: continue
+                    if df_macro.empty or df_micro.empty: continue
                     
-                    df_4h['EMA_20'] = df_4h['close'].ewm(span=20, adjust=False).mean()
-                    df_4h['EMA_50'] = df_4h['close'].ewm(span=50, adjust=False).mean()
-                    df_4h['ema_spread'] = (df_4h['EMA_20'] - df_4h['EMA_50']).abs() / df_4h['close'] * 100
+                    df_macro['EMA_20'] = df_macro['close'].ewm(span=20, adjust=False).mean()
+                    df_macro['EMA_50'] = df_macro['close'].ewm(span=50, adjust=False).mean()
+                    df_macro['ema_spread'] = (df_macro['EMA_20'] - df_macro['EMA_50']).abs() / df_macro['close'] * 100
                     
-                    closed_4h = df_4h.iloc[-2]
-                    is_bull = (closed_4h['EMA_20'] > closed_4h['EMA_50']) and (closed_4h['ema_spread'] > 0.15)
-                    is_bear = (closed_4h['EMA_20'] < closed_4h['EMA_50']) and (closed_4h['ema_spread'] > 0.15)
+                    closed_macro = df_macro.iloc[-2]
+                    is_bull = (closed_macro['EMA_20'] > closed_macro['EMA_50']) and (closed_macro['ema_spread'] > 0.05)
+                    is_bear = (closed_macro['EMA_20'] < closed_macro['EMA_50']) and (closed_macro['ema_spread'] > 0.05)
 
-                    df_1h['SMA_20'] = df_1h['close'].rolling(window=20).mean()
-                    df_1h['STD_20'] = df_1h['close'].rolling(window=20).std()
-                    df_1h['BBL'] = df_1h['SMA_20'] - (df_1h['STD_20'] * 2.0)
-                    df_1h['BBU'] = df_1h['SMA_20'] + (df_1h['STD_20'] * 2.0)
+                    df_micro['SMA_20'] = df_micro['close'].rolling(window=20).mean()
+                    df_micro['STD_20'] = df_micro['close'].rolling(window=20).std()
+                    # Loosened BB to 1.5 standard deviations
+                    df_micro['BBL'] = df_micro['SMA_20'] - (df_micro['STD_20'] * 1.5)
+                    df_micro['BBU'] = df_micro['SMA_20'] + (df_micro['STD_20'] * 1.5)
                     
-                    tr = pd.concat([df_1h['high'] - df_1h['low'], 
-                                    (df_1h['high'] - df_1h['close'].shift()).abs(), 
-                                    (df_1h['low'] - df_1h['close'].shift()).abs()], axis=1).max(axis=1)
-                    df_1h['ATR'] = tr.rolling(window=14).mean()
+                    tr = pd.concat([df_micro['high'] - df_micro['low'], 
+                                    (df_micro['high'] - df_micro['close'].shift()).abs(), 
+                                    (df_micro['low'] - df_micro['close'].shift()).abs()], axis=1).max(axis=1)
+                    df_micro['ATR'] = tr.rolling(window=14).mean()
                     
-                    closed_1h = df_1h.iloc[-2]
-                    live_candle = df_1h.iloc[-1]
+                    closed_micro = df_micro.iloc[-2]
+                    live_candle = df_micro.iloc[-1]
                     live_price = live_candle['close']
                     
                     pos = self.positions[pair]
                     
-                    # 1. PROCESS ACTIVE TRADES (Exchange Matching Engine Simulation)
+                    # 1. PROCESS ACTIVE TRADES
                     if pos['status'] == 'ACTIVE':
                         side, sl, tp = pos['side'], pos['sl'], pos['tp']
                         
-                        # Timeout
+                        # Timeout adapted for 15m triggers (4 hours)
                         hours_held = (datetime.now() - pos['entry_time']).total_seconds() / 3600
-                        if hours_held >= 14:
+                        if hours_held >= 4:
                             self.close_trade(pair, live_price, "Time Timeout", order_type="TAKER")
                             continue
 
@@ -150,7 +150,6 @@ class AMTEBot:
                                 self.positions[pair]['sl'] = pos['be_sl']
                                 self.positions[pair]['be_moved'] = True
                         
-                        # Native Exchange Order Hits
                         if side == 'LONG':
                             if live_price <= sl: self.close_trade(pair, sl, "Stop Market Hit", order_type="TAKER")
                             elif live_price >= tp: self.close_trade(pair, tp, "Limit TP Filled", order_type="MAKER")
@@ -159,15 +158,13 @@ class AMTEBot:
                             elif live_price <= tp: self.close_trade(pair, tp, "Limit TP Filled", order_type="MAKER")
                         continue
 
-                    # 2. PROCESS PENDING LIMIT ORDERS (Order Book Simulation)
+                    # 2. PROCESS PENDING LIMIT ORDERS
                     if pos['status'] == 'PENDING_ENTRY':
-                        # Cancel limit order if macro regime shifted
                         if (pos['side'] == 'LONG' and not is_bull) or (pos['side'] == 'SHORT' and not is_bear):
                             self.positions[pair] = {'status': 'NONE'}
-                            send_telegram_alert(f"🗑️ <b>LIMIT ORDER CANCELLED</b>\n{pair} regime shifted. Resting order pulled.")
+                            send_telegram_alert(f"🗑️ <b>LIMIT CANCELLED</b>\n{pair} regime shifted. Order pulled.")
                             continue
                             
-                        # Check if limit order was filled by market movement
                         if pos['side'] == 'LONG' and live_candle['low'] <= pos['limit_price']:
                             self.activate_trade(pair)
                         elif pos['side'] == 'SHORT' and live_candle['high'] >= pos['limit_price']:
@@ -179,16 +176,16 @@ class AMTEBot:
                         continue
 
                     risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
-                    atr = closed_1h['ATR']
+                    atr = closed_micro['ATR']
                     
-                    if is_bull and live_price > closed_1h['BBL']:
-                        limit_price = closed_1h['BBL']
+                    if is_bull and live_price > closed_micro['BBL']:
+                        limit_price = closed_micro['BBL']
                         sl, tp = limit_price - (atr * 2.0), limit_price + (atr * 4.0)
                         size = risk_usd / (limit_price - sl)
                         self.place_limit_order(pair, 'LONG', limit_price, sl, tp, size, atr)
                         
-                    elif is_bear and live_price < closed_1h['BBU']:
-                        limit_price = closed_1h['BBU']
+                    elif is_bear and live_price < closed_micro['BBU']:
+                        limit_price = closed_micro['BBU']
                         sl, tp = limit_price + (atr * 2.0), limit_price - (atr * 4.0)
                         size = risk_usd / (sl - limit_price)
                         self.place_limit_order(pair, 'SHORT', limit_price, sl, tp, size, atr)
@@ -207,7 +204,7 @@ class AMTEBot:
             'sl': sl, 'tp': tp, 'size': size, 'be_trigger': be_trigger, 
             'be_sl': be_sl, 'be_moved': False
         }
-        msg = f"⏳ <b>RESTING LIMIT ORDER PLACED</b>\nPair: {pair}\nSide: {side}\nWait Price: ${limit_price:,.2f}"
+        msg = f"⏳ <b>RESTING LIMIT PLACED</b>\nPair: {pair}\nSide: {side}\nWait Price: ${limit_price:,.2f}"
         send_telegram_alert(msg)
 
     def activate_trade(self, pair):
@@ -215,21 +212,18 @@ class AMTEBot:
         self.positions[pair]['entry_time'] = datetime.now()
         self.daily_trades += 1
         pos = self.positions[pair]
-        
-        msg = f"🟢 <b>ORDER FILLED (Maker)</b>\nPair: {pair}\nSide: {pos['side']}\nFilled: ${pos['limit_price']:,.2f}\nNative Stop Placed: ${pos['sl']:,.2f}"
+        msg = f"🟢 <b>ORDER FILLED (Maker)</b>\nPair: {pair}\nSide: {pos['side']}\nFilled: ${pos['limit_price']:,.2f}"
         send_telegram_alert(msg)
 
     def close_trade(self, pair, execution_price, reason, order_type):
         pos = self.positions[pair]
         entry_price = pos['limit_price']
         
-        # Apply Slippage only to Market Taker Orders
         slippage = SLIPPAGE_RATE if order_type == "TAKER" else 0.0
         actual_exit = execution_price * (1 - slippage) if pos['side'] == 'LONG' else execution_price * (1 + slippage)
         
         gross_usd = (actual_exit - entry_price) * pos['size'] if pos['side'] == 'LONG' else (entry_price - actual_exit) * pos['size']
         
-        # Calculate Fees: Maker (Entry) + Maker/Taker (Exit)
         entry_fee = (entry_price * pos['size']) * MAKER_FEE
         exit_fee = (actual_exit * pos['size']) * (MAKER_FEE if order_type == "MAKER" else TAKER_FEE)
         fees_usd = entry_fee + exit_fee
@@ -250,7 +244,7 @@ class AMTEBot:
         self.positions[pair] = {'status': 'NONE'}
         
         icon = "✅" if net_inr > 0 else "❌"
-        msg = f"{icon} <b>POSITION CLOSED</b>\nPair: {pair}\nType: {order_type} ({reason})\nExit: ${actual_exit:,.2f}\nNet PnL: ₹{net_inr:,.2f}\nDaily PnL: ₹{self.daily_pnl_inr:,.2f}"
+        msg = f"{icon} <b>POSITION CLOSED</b>\nPair: {pair}\nReason: {reason}\nNet PnL: ₹{net_inr:,.2f}"
         send_telegram_alert(msg)
 
 @st.cache_resource
@@ -266,7 +260,7 @@ bot_instance = start_background_bot()
 # STREAMLIT DASHBOARD UI
 # ==========================================
 st.set_page_config(page_title="AMTE Institutional Engine", layout="wide")
-st.title("⚡ AMTE Institutional Pipeline (Order Book Engine)")
+st.title("⚡ AMTE Institutional Pipeline (Action Mode)")
 
 df_ledger = pd.read_csv(TRADE_LOG_FILE) if os.path.exists(TRADE_LOG_FILE) else pd.DataFrame()
 total_net_inr = df_ledger['Net_PnL_INR'].sum() if not df_ledger.empty and 'Net_PnL_INR' in df_ledger.columns else 0.0
@@ -274,7 +268,7 @@ current_bal_inr = CAPITAL_INR + total_net_inr
 
 kill_switch_status = "🟢 ACTIVE"
 if bot_instance.daily_trades >= MAX_DAILY_TRADES or bot_instance.daily_pnl_inr <= MAX_DAILY_LOSS_INR:
-    kill_switch_status = "🔴 TRIGGERED (Sleeping)"
+    kill_switch_status = "🔴 TRIGGERED"
 
 active_count = sum(1 for p in bot_instance.positions.values() if p['status'] == 'ACTIVE')
 pending_count = sum(1 for p in bot_instance.positions.values() if p['status'] == 'PENDING_ENTRY')
@@ -287,46 +281,41 @@ col4.metric("Today's Net PnL", f"₹{bot_instance.daily_pnl_inr:,.2f}")
 col5.metric("System Guardrails", kill_switch_status)
 
 st.markdown("---")
-
-st.subheader("📊 Advanced Order Routing & Tracking")
+st.subheader("📊 15m Active Order Routing & Tracking")
 selected_pair = st.selectbox("Select Asset Pair:", PAIRS)
 
-df_chart = fetch_live_data(selected_pair, "1h", 100)
+df_chart = fetch_live_data(selected_pair, "15m", 100)
 if not df_chart.empty:
     df_chart['SMA20'] = df_chart['close'].rolling(20).mean()
     df_chart['STD'] = df_chart['close'].rolling(20).std()
-    df_chart['BBL'] = df_chart['SMA20'] - (df_chart['STD'] * 2.0)
-    df_chart['BBU'] = df_chart['SMA20'] + (df_chart['STD'] * 2.0)
+    df_chart['BBL'] = df_chart['SMA20'] - (df_chart['STD'] * 1.5)
+    df_chart['BBU'] = df_chart['SMA20'] + (df_chart['STD'] * 1.5)
 
     fig = go.Figure()
-    
     fig.add_trace(go.Candlestick(
         x=df_chart.index, open=df_chart['open'], high=df_chart['high'],
-        low=df_chart['low'], close=df_chart['close'], name="1H Candles"
+        low=df_chart['low'], close=df_chart['close'], name="15m Candles"
     ))
-    
     fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BBU'], line=dict(color='rgba(150, 150, 150, 0.5)', width=1), name="Upper BB"))
     fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BBL'], line=dict(color='rgba(150, 150, 150, 0.5)', width=1), fill='tonexty', fillcolor='rgba(100, 100, 255, 0.05)', name="Lower BB"))
 
     pos = bot_instance.positions[selected_pair]
     
     if pos['status'] == 'PENDING_ENTRY':
-        fig.add_hline(y=pos['limit_price'], line_dash="dot", line_color="#BDBDBD", annotation_text=f"Resting Limit Order: ${pos['limit_price']:,.2f}")
-    
+        fig.add_hline(y=pos['limit_price'], line_dash="dot", line_color="#BDBDBD", annotation_text=f"Resting Limit: ${pos['limit_price']:,.2f}")
     elif pos['status'] == 'ACTIVE':
-        fig.add_hline(y=pos['limit_price'], line_dash="solid", line_color="#FF9800", annotation_text=f"Entry Filled: ${pos['limit_price']:,.2f}")
-        fig.add_hline(y=pos['tp'], line_dash="dash", line_color="#00E676", annotation_text=f"Limit TP: ${pos['tp']:,.2f}")
-        fig.add_hline(y=pos['sl'], line_dash="dash", line_color="#FF5252", annotation_text=f"Stop Market: ${pos['sl']:,.2f}")
+        fig.add_hline(y=pos['limit_price'], line_dash="solid", line_color="#FF9800", annotation_text=f"Entry: ${pos['limit_price']:,.2f}")
+        fig.add_hline(y=pos['tp'], line_dash="dash", line_color="#00E676", annotation_text=f"Take Profit: ${pos['tp']:,.2f}")
+        fig.add_hline(y=pos['sl'], line_dash="dash", line_color="#FF5252", annotation_text=f"Stop Loss: ${pos['sl']:,.2f}")
 
     fig.update_layout(height=520, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=15, r=15, t=20, b=15))
     st.plotly_chart(fig, use_container_width=True)
 else:
-    st.warning("Fetching 1H market data from CoinDCX...")
+    st.warning("Fetching 15m market data from CoinDCX...")
 
 st.markdown("---")
-
-st.subheader("📜 Institutional Ledger (Maker/Taker Analysis)")
+st.subheader("📜 Institutional Ledger")
 if not df_ledger.empty:
     st.dataframe(df_ledger.sort_index(ascending=False), use_container_width=True)
 else:
-    st.info("No limit orders filled yet. The engine is waiting for liquidity absorption.")
+    st.info("No limit orders filled yet. Waiting for market dips.")
