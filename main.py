@@ -101,7 +101,7 @@ class AMTEBot:
         self.current_date = date.today()
         self.daily_trades = 0
         self.daily_pnl_inr = 0.0
-        self.max_daily_trades = 10  # Increased to 10
+        self.max_daily_trades = 10  # Capped at 10 trades per day
         self.max_daily_loss = -1000.00
         self.max_concurrent = 2
 
