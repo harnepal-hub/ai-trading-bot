@@ -60,7 +60,6 @@ def log_trade(filename, trade_data):
         df_new.to_csv(filename, mode='w', header=True, index=False)
 
 def calculate_ehma(series, length=16):
-    """Exponential Hull Moving Average from Pine Script"""
     half_len = max(1, length // 2)
     sqrt_len = max(1, int(round(math.sqrt(length))))
     ema_half = series.ewm(span=half_len, adjust=False).mean()
@@ -69,7 +68,6 @@ def calculate_ehma(series, length=16):
     return diff.ewm(span=sqrt_len, adjust=False).mean()
 
 def calculate_pivots(df, left=33, right=21, quick_right=3):
-    """Calculates swing highs/lows matching TW script auto SR"""
     highs = df['high'].values
     lows = df['low'].values
     n = len(df)
@@ -103,7 +101,7 @@ class AMTEBot:
         self.current_date = date.today()
         self.daily_trades = 0
         self.daily_pnl_inr = 0.0
-        self.max_daily_trades = 5
+        self.max_daily_trades = 10  # Increased to 10
         self.max_daily_loss = -1000.00
         self.max_concurrent = 2
 
@@ -230,7 +228,7 @@ class AMTEBot:
         send_telegram_alert(f"🔔 <b>[AMTE] CLOSED</b>\nPair: {pair}\nReason: {reason}\nNet: ₹{net_inr:,.2f}")
 
 # ==========================================
-# STRATEGY 2: TW ALL-IN-ONE ENGINE (10 Trades/Day)
+# STRATEGY 2: TW ALL-IN-ONE ENGINE
 # ==========================================
 class TWAllInOneBot:
     def __init__(self, pairs):
@@ -239,7 +237,7 @@ class TWAllInOneBot:
         self.current_date = date.today()
         self.daily_trades = 0
         self.daily_pnl_inr = 0.0
-        self.max_daily_trades = 10  # 10 trades per day including all coins
+        self.max_daily_trades = 10 
         self.max_daily_loss = -2000.00
         self.max_concurrent = 3
 
@@ -263,7 +261,6 @@ class TWAllInOneBot:
             time.sleep(0.5)
             if df.empty or len(df) < 105: continue
 
-            # Pine Script Port: EHMA(16), SHULL(2 bars back), EMA100
             df['EMA100'] = df['close'].ewm(span=100, adjust=False).mean()
             df['MHULL'] = calculate_ehma(df['close'], length=16)
             df['SHULL'] = df['MHULL'].shift(2)
@@ -278,7 +275,6 @@ class TWAllInOneBot:
             live_candle = df.iloc[-1]
             live_price = live_candle['close']
 
-            # TW Pine Script Crossover / Crossunder Detection
             buy_signal = (c_prev['SHULL'] >= c_prev['MHULL']) and (c_curr['SHULL'] < c_curr['MHULL']) and (c_curr['close'] > c_curr['EMA100'])
             sell_signal = (c_prev['SHULL'] <= c_prev['MHULL']) and (c_curr['SHULL'] > c_curr['MHULL']) and (c_curr['close'] < c_curr['EMA100'])
 
@@ -303,7 +299,6 @@ class TWAllInOneBot:
 
             if kill_active or active_count >= self.max_concurrent: continue
 
-            # Dynamic Support/Resistance from Pivots
             p_high, p_low, q_high, q_low = calculate_pivots(df)
             atr = c_curr['ATR']
             risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
@@ -314,7 +309,7 @@ class TWAllInOneBot:
                 tp = p_high if (not np.isnan(p_high) and p_high > limit_p) else (limit_p + atr * 3.6)
                 size = risk_usd / max(0.0001, (limit_p - sl))
                 self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': limit_p, 'sl': sl, 'tp': tp, 'size': size}
-                send_telegram_alert(f"🎯 <b>[TW All-in-One] BUY SIGNAL</b>\nPair: {pair}\nPrice: ${limit_p:,.2f}\nTarget: ${tp:,.2f}\nStop: ${sl:,.2f}")
+                send_telegram_alert(f"🎯 <b>[TW All-in-One] BUY SIGNAL</b>\nPair: {pair}\nPrice: ${limit_p:,.2f}")
 
             elif sell_signal:
                 limit_p = live_price
@@ -322,7 +317,7 @@ class TWAllInOneBot:
                 tp = p_low if (not np.isnan(p_low) and p_low < limit_p) else (limit_p - atr * 3.6)
                 size = risk_usd / max(0.0001, (sl - limit_p))
                 self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': limit_p, 'sl': sl, 'tp': tp, 'size': size}
-                send_telegram_alert(f"🎯 <b>[TW All-in-One] SELL SIGNAL</b>\nPair: {pair}\nPrice: ${limit_p:,.2f}\nTarget: ${tp:,.2f}\nStop: ${sl:,.2f}")
+                send_telegram_alert(f"🎯 <b>[TW All-in-One] SELL SIGNAL</b>\nPair: {pair}\nPrice: ${limit_p:,.2f}")
 
     def activate_trade(self, pair):
         self.positions[pair]['status'] = 'ACTIVE'
@@ -360,7 +355,7 @@ class MasterEngine:
 
     def loop(self):
         time.sleep(5)
-        send_telegram_alert("🚀 <b>Dual Quantitative Pipeline Live</b>\nTab 1: AMTE BB Pullback\nTab 2: TW All-In-One (10 Trades/Day)")
+        send_telegram_alert("🚀 <b>Dual Quantitative Pipeline Live</b>\nTab 1: AMTE BB Pullback (10 Trades)\nTab 2: TW All-In-One (10 Trades)")
         while True:
             try:
                 self.amte.process_cycle()
@@ -384,7 +379,7 @@ master = start_master_engine()
 st.set_page_config(page_title="AMTE Quantitative Terminal", layout="wide")
 st.title("⚡ AMTE Quantitative Multi-Model Terminal")
 
-tab1, tab2 = st.tabs(["⚡ Strategy A: AMTE BB Pullback (5 Trades/Day)", "🎯 Strategy B: TW All-In-One (10 Trades/Day)"])
+tab1, tab2 = st.tabs(["⚡ Strategy A: AMTE BB Pullback (10 Trades/Day)", "🎯 Strategy B: TW All-In-One (10 Trades/Day)"])
 
 # ------------------------------------------
 # TAB 1: AMTE BB PULLBACK
@@ -430,6 +425,8 @@ with tab1:
 
     st.subheader("📜 AMTE Trade Ledger")
     if not df_amte_led.empty:
+        csv_a = df_amte_led.to_csv(index=False).encode('utf-8')
+        st.download_button(label="📥 Download AMTE Ledger", data=csv_a, file_name='amte_ledger.csv', mime='text/csv')
         st.dataframe(df_amte_led.sort_index(ascending=False), use_container_width=True)
     else:
         st.info("No trades executed yet under Strategy A.")
@@ -450,7 +447,7 @@ with tab2:
     t4.metric("Today's PnL", f"₹{master.tw.daily_pnl_inr:,.2f}")
 
     st.markdown("---")
-    st.subheader("📊 TW All-In-One Indicator Overlay (EHMA + Pivots + EMA100)")
+    st.subheader("📊 TW All-In-One Indicator Overlay")
     pair_b = st.selectbox("Select Asset Pair (Strategy B):", PAIRS, key="pair_b")
     df_chart_b = fetch_live_data(pair_b, "15m", 120)
 
@@ -462,17 +459,14 @@ with tab2:
 
         fig_b = go.Figure()
         fig_b.add_trace(go.Candlestick(x=df_chart_b.index, open=df_chart_b['open'], high=df_chart_b['high'], low=df_chart_b['low'], close=df_chart_b['close'], name="15m Candles"))
-        
-        # Pine Script Indicator Visualizations
-        fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['MHULL'], line=dict(color='#0018F3', width=2), name="MHULL (EHMA 16)"))
-        fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['SHULL'], line=dict(color='#FF4B4B', width=1.5, dash='dot'), name="SHULL (Lag 2)"))
-        fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['EMA100'], line=dict(color='#9C27B0', width=2), name="EMA 100 Baseline"))
+        fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['MHULL'], line=dict(color='#0018F3', width=2), name="MHULL"))
+        fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['SHULL'], line=dict(color='#FF4B4B', width=1.5, dash='dot'), name="SHULL"))
+        fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['EMA100'], line=dict(color='#9C27B0', width=2), name="EMA 100"))
 
-        # Pine Script Pivot Levels
         if not np.isnan(p_high):
-            fig_b.add_hline(y=p_high, line_dash="dash", line_color="#00E676", annotation_text=f"Pivot Target: ${p_high:,.2f}")
+            fig_b.add_hline(y=p_high, line_dash="dash", line_color="#00E676", annotation_text=f"Target: ${p_high:,.2f}")
         if not np.isnan(q_low):
-            fig_b.add_hline(y=q_low, line_dash="dash", line_color="#FF5252", annotation_text=f"Pivot Support: ${q_low:,.2f}")
+            fig_b.add_hline(y=q_low, line_dash="dash", line_color="#FF5252", annotation_text=f"Support: ${q_low:,.2f}")
 
         pos_b = master.tw.positions[pair_b]
         if pos_b['status'] == 'PENDING_ENTRY':
@@ -487,6 +481,8 @@ with tab2:
 
     st.subheader("📜 TW All-In-One Trade Ledger")
     if not df_tw_led.empty:
+        csv_b = df_tw_led.to_csv(index=False).encode('utf-8')
+        st.download_button(label="📥 Download TW Ledger", data=csv_b, file_name='tw_ledger.csv', mime='text/csv')
         st.dataframe(df_tw_led.sort_index(ascending=False), use_container_width=True)
     else:
         st.info("No trades executed yet under TW All-In-One.")
