@@ -54,7 +54,6 @@ def fetch_live_data(pair, interval, limit=120):
     except: return pd.DataFrame()
 
 def log_trade(filename, trade_data):
-    # Safely appends new data while accommodating new columns without overwriting old history
     df_new = pd.DataFrame([trade_data])
     if os.path.exists(filename):
         try:
@@ -264,7 +263,7 @@ class TWAllInOneBot:
 
             df['EMA100'] = df['close'].ewm(span=100, adjust=False).mean()
             df['MHULL'] = calculate_ehma(df['close'], length=16)
-            df['SHULL'] = df['MHULL'].shift(2) # Original 2-bar lag
+            df['SHULL'] = df['MHULL'].shift(2) 
             tr = pd.concat([df['high'] - df['low'], (df['high'] - df['close'].shift()).abs(), (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
             df['ATR'] = tr.rolling(14).mean()
 
@@ -378,19 +377,16 @@ class TWTunedBot:
 
             df['EMA100'] = df['close'].ewm(span=100, adjust=False).mean()
             df['MHULL'] = calculate_ehma(df['close'], length=16)
-            # UPGRADE 1: Wider 3-bar lag to filter noise
             df['SHULL'] = df['MHULL'].shift(3) 
             
             tr = pd.concat([df['high'] - df['low'], (df['high'] - df['close'].shift()).abs(), (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
             df['ATR'] = tr.rolling(14).mean()
-            # UPGRADE 2: ATR Volatility Gate
             df['ATR_50'] = df['ATR'].rolling(50).mean()
 
             c_prev = df.iloc[-3]
             c_curr = df.iloc[-2]
             live_price = df.iloc[-1]['close']
 
-            # UPGRADE 3: Added Volatility Gate (ATR > ATR_50) and Price Close Confirmation (close > MHULL)
             buy_signal = (c_prev['SHULL'] >= c_prev['MHULL']) and (c_curr['SHULL'] < c_curr['MHULL']) and \
                          (c_curr['close'] > c_curr['EMA100']) and (c_curr['close'] > c_curr['MHULL']) and \
                          (c_curr['ATR'] > c_curr['ATR_50'])
@@ -465,7 +461,6 @@ class TWTunedBot:
         self.positions[pair] = {'status': 'NONE'}
         send_telegram_alert(f"🔔 <b>[TW Tuned] CLOSED</b>\nPair: {pair}\nReason: {reason}\nNet: ₹{net_inr:,.2f}")
 
-
 # ==========================================
 # MASTER THREAD RUNNER
 # ==========================================
@@ -519,6 +514,20 @@ with tab1:
     c3.metric("Today's Trades", f"{master.amte.daily_trades} / {master.amte.max_daily_trades}")
     c4.metric("Today's PnL", f"₹{master.amte.daily_pnl_inr:,.2f}")
 
+    # NEW: Active & Pending Trades List
+    live_trades_a = []
+    for p, pos in master.amte.positions.items():
+        if pos['status'] != 'NONE':
+            live_trades_a.append({
+                "Pair": p, "Status": pos['status'], "Side": pos.get('side', '-'),
+                "Target Entry": f"${pos.get('limit_price', 0):,.2f}",
+                "Take Profit": f"${pos.get('tp', 0):,.2f}",
+                "Stop Loss": f"${pos.get('sl', 0):,.2f}"
+            })
+    if live_trades_a:
+        st.write("🟢 **Currently Running & Pending Trades**")
+        st.dataframe(pd.DataFrame(live_trades_a), use_container_width=True, hide_index=True)
+
     st.markdown("---")
     st.subheader("📊 15m Bollinger Band Pullback Routing")
     pair_a = st.selectbox("Select Asset Pair (Strategy A):", PAIRS, key="pair_a")
@@ -543,7 +552,8 @@ with tab1:
             fig_a.add_hline(y=pos_a['tp'], line_dash="dash", line_color="#00E676", annotation_text=f"TP: ${pos_a['tp']:,.2f}")
             fig_a.add_hline(y=pos_a['sl'], line_dash="dash", line_color="#FF5252", annotation_text=f"SL: ${pos_a['sl']:,.2f}")
 
-        fig_a.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
+        # Update chart to match the bright theme shown in the image screenshot
+        fig_a.update_layout(height=450, template="plotly_white", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
         st.plotly_chart(fig_a, use_container_width=True)
 
     if not df_amte_led.empty:
@@ -564,6 +574,20 @@ with tab2:
     t2.metric("Market Exposure", f"{active_tw} Active / {pending_tw} Pending")
     t3.metric("Today's Trades", f"{master.tw_orig.daily_trades} / {master.tw_orig.max_daily_trades}")
     t4.metric("Today's PnL", f"₹{master.tw_orig.daily_pnl_inr:,.2f}")
+
+    # NEW: Active & Pending Trades List
+    live_trades_b = []
+    for p, pos in master.tw_orig.positions.items():
+        if pos['status'] != 'NONE':
+            live_trades_b.append({
+                "Pair": p, "Status": pos['status'], "Side": pos.get('side', '-'),
+                "Target Entry": f"${pos.get('limit_price', 0):,.2f}",
+                "Take Profit": f"${pos.get('tp', 0):,.2f}",
+                "Stop Loss": f"${pos.get('sl', 0):,.2f}"
+            })
+    if live_trades_b:
+        st.write("🟢 **Currently Running & Pending Trades**")
+        st.dataframe(pd.DataFrame(live_trades_b), use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.subheader("📊 TW Original (2-Bar Lag)")
@@ -589,7 +613,7 @@ with tab2:
             fig_b.add_hline(y=pos_b['tp'], line_dash="dash", line_color="#00E676", annotation_text="TP")
             fig_b.add_hline(y=pos_b['sl'], line_dash="dash", line_color="#FF5252", annotation_text="SL")
 
-        fig_b.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
+        fig_b.update_layout(height=450, template="plotly_white", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
         st.plotly_chart(fig_b, use_container_width=True)
 
     if not df_tw_led.empty:
@@ -611,6 +635,20 @@ with tab3:
     f3.metric("Today's Trades", f"{master.tw_tuned.daily_trades} / {master.tw_tuned.max_daily_trades}")
     f4.metric("Today's PnL", f"₹{master.tw_tuned.daily_pnl_inr:,.2f}")
 
+    # NEW: Active & Pending Trades List
+    live_trades_c = []
+    for p, pos in master.tw_tuned.positions.items():
+        if pos['status'] != 'NONE':
+            live_trades_c.append({
+                "Pair": p, "Status": pos['status'], "Side": pos.get('side', '-'),
+                "Target Entry": f"${pos.get('limit_price', 0):,.2f}",
+                "Take Profit": f"${pos.get('tp', 0):,.2f}",
+                "Stop Loss": f"${pos.get('sl', 0):,.2f}"
+            })
+    if live_trades_c:
+        st.write("🟢 **Currently Running & Pending Trades**")
+        st.dataframe(pd.DataFrame(live_trades_c), use_container_width=True, hide_index=True)
+
     st.markdown("---")
     st.subheader("📊 TW Fine-Tuned (3-Bar Lag + ATR Volatility Filter)")
     pair_c = st.selectbox("Select Asset Pair (Strategy C):", PAIRS, key="pair_c")
@@ -619,7 +657,7 @@ with tab3:
     if not df_chart_c.empty and len(df_chart_c) >= 105:
         df_chart_c['EMA100'] = df_chart_c['close'].ewm(span=100, adjust=False).mean()
         df_chart_c['MHULL'] = calculate_ehma(df_chart_c['close'], 16)
-        df_chart_c['SHULL'] = df_chart_c['MHULL'].shift(3) # The new 3-bar lag
+        df_chart_c['SHULL'] = df_chart_c['MHULL'].shift(3) 
 
         fig_c = go.Figure()
         fig_c.add_trace(go.Candlestick(x=df_chart_c.index, open=df_chart_c['open'], high=df_chart_c['high'], low=df_chart_c['low'], close=df_chart_c['close'], name="15m Candles"))
@@ -634,7 +672,7 @@ with tab3:
             fig_c.add_hline(y=pos_c['tp'], line_dash="dash", line_color="#00E676", annotation_text="TP")
             fig_c.add_hline(y=pos_c['sl'], line_dash="dash", line_color="#FF5252", annotation_text="SL")
 
-        fig_c.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
+        fig_c.update_layout(height=450, template="plotly_white", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
         st.plotly_chart(fig_c, use_container_width=True)
 
     if not df_tuned_led.empty:
