@@ -4,3 +4,4 @@ numpy
 streamlit
 plotly
 gunicorn
+aiohttp==3.9.3
