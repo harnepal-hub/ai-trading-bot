@@ -147,8 +147,10 @@ class AMTEBot:
                 self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
 
                 if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 4:
-                    self.close_trade(pair, live_price, "Timeout", "TAKER")
-                    continue
+                    if (floating_usd - floating_fees) > 0:
+                        self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
+                        continue
+                
                 if not pos.get('be_moved', False):
                     if (pos['side'] == 'LONG' and live_price >= pos['be_trig']) or (pos['side'] == 'SHORT' and live_price <= pos['be_trig']):
                         self.positions[pair]['sl'] = pos['be_sl']
@@ -269,8 +271,10 @@ class TWAllInOneBot:
                 self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
 
                 if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 6:
-                    self.close_trade(pair, live_price, "Timeout", "TAKER")
-                    continue
+                    if (floating_usd - floating_fees) > 0:
+                        self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
+                        continue
+                        
                 if pos['side'] == 'LONG':
                     if live_price <= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
                     elif live_price >= pos['tp']: self.close_trade(pair, pos['tp'], "Limit TP", "MAKER")
@@ -383,8 +387,10 @@ class TWTunedBot:
                 self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
 
                 if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 6:
-                    self.close_trade(pair, live_price, "Timeout", "TAKER")
-                    continue
+                    if (floating_usd - floating_fees) > 0:
+                        self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
+                        continue
+                        
                 if pos['side'] == 'LONG':
                     if live_price <= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
                     elif live_price >= pos['tp']: self.close_trade(pair, pos['tp'], "Limit TP", "MAKER")
@@ -482,7 +488,6 @@ with tab1:
     active_amte = sum(1 for p in master.amte.positions.values() if p['status'] == 'ACTIVE')
     pending_amte = sum(1 for p in master.amte.positions.values() if p['status'] == 'PENDING_ENTRY')
     
-    # Calculate Win Rate
     win_rate_a, wins_a, losses_a = 0.0, 0, 0
     if not df_amte_led.empty and 'Net_PnL_INR' in df_amte_led.columns:
         wins_a = len(df_amte_led[df_amte_led['Net_PnL_INR'] > 0])
@@ -550,7 +555,6 @@ with tab2:
     active_tw = sum(1 for p in master.tw_orig.positions.values() if p['status'] == 'ACTIVE')
     pending_tw = sum(1 for p in master.tw_orig.positions.values() if p['status'] == 'PENDING_ENTRY')
     
-    # Calculate Win Rate
     win_rate_b, wins_b, losses_b = 0.0, 0, 0
     if not df_tw_led.empty and 'Net_PnL_INR' in df_tw_led.columns:
         wins_b = len(df_tw_led[df_tw_led['Net_PnL_INR'] > 0])
@@ -617,7 +621,6 @@ with tab3:
     active_tuned = sum(1 for p in master.tw_tuned.positions.values() if p['status'] == 'ACTIVE')
     pending_tuned = sum(1 for p in master.tw_tuned.positions.values() if p['status'] == 'PENDING_ENTRY')
 
-    # Calculate Win Rate
     win_rate_c, wins_c, losses_c = 0.0, 0, 0
     if not df_tuned_led.empty and 'Net_PnL_INR' in df_tuned_led.columns:
         wins_c = len(df_tuned_led[df_tuned_led['Net_PnL_INR'] > 0])
