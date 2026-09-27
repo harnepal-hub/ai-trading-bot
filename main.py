@@ -481,12 +481,21 @@ with tab1:
     net_amte = df_amte_led['Net_PnL_INR'].sum() if not df_amte_led.empty and 'Net_PnL_INR' in df_amte_led.columns else 0.0
     active_amte = sum(1 for p in master.amte.positions.values() if p['status'] == 'ACTIVE')
     pending_amte = sum(1 for p in master.amte.positions.values() if p['status'] == 'PENDING_ENTRY')
+    
+    # Calculate Win Rate
+    win_rate_a, wins_a, losses_a = 0.0, 0, 0
+    if not df_amte_led.empty and 'Net_PnL_INR' in df_amte_led.columns:
+        wins_a = len(df_amte_led[df_amte_led['Net_PnL_INR'] > 0])
+        losses_a = len(df_amte_led[df_amte_led['Net_PnL_INR'] <= 0])
+        total_a = wins_a + losses_a
+        win_rate_a = (wins_a / total_a * 100) if total_a > 0 else 0.0
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Capital Balance", f"₹{(CAPITAL_INR + net_amte):,.2f}", f"₹{net_amte:,.2f}")
     c2.metric("Market Exposure", f"{active_amte} Active / {pending_amte} Pending")
     c3.metric("Today's Trades", f"{master.amte.daily_trades} / {master.amte.max_daily_trades}")
     c4.metric("Today's PnL", f"₹{master.amte.daily_pnl_inr:,.2f}")
+    c5.metric("Win Rate (All-Time)", f"{win_rate_a:.1f}%", f"{wins_a}W / {losses_a}L")
 
     live_trades_a = []
     for p, pos in master.amte.positions.items():
@@ -540,12 +549,21 @@ with tab2:
     net_tw = df_tw_led['Net_PnL_INR'].sum() if not df_tw_led.empty and 'Net_PnL_INR' in df_tw_led.columns else 0.0
     active_tw = sum(1 for p in master.tw_orig.positions.values() if p['status'] == 'ACTIVE')
     pending_tw = sum(1 for p in master.tw_orig.positions.values() if p['status'] == 'PENDING_ENTRY')
+    
+    # Calculate Win Rate
+    win_rate_b, wins_b, losses_b = 0.0, 0, 0
+    if not df_tw_led.empty and 'Net_PnL_INR' in df_tw_led.columns:
+        wins_b = len(df_tw_led[df_tw_led['Net_PnL_INR'] > 0])
+        losses_b = len(df_tw_led[df_tw_led['Net_PnL_INR'] <= 0])
+        total_b = wins_b + losses_b
+        win_rate_b = (wins_b / total_b * 100) if total_b > 0 else 0.0
 
-    t1, t2, t3, t4 = st.columns(4)
+    t1, t2, t3, t4, t5 = st.columns(5)
     t1.metric("Capital Balance", f"₹{(CAPITAL_INR + net_tw):,.2f}", f"₹{net_tw:,.2f}")
     t2.metric("Market Exposure", f"{active_tw} Active / {pending_tw} Pending")
     t3.metric("Today's Trades", f"{master.tw_orig.daily_trades} / {master.tw_orig.max_daily_trades}")
     t4.metric("Today's PnL", f"₹{master.tw_orig.daily_pnl_inr:,.2f}")
+    t5.metric("Win Rate (All-Time)", f"{win_rate_b:.1f}%", f"{wins_b}W / {losses_b}L")
 
     live_trades_b = []
     for p, pos in master.tw_orig.positions.items():
@@ -599,11 +617,20 @@ with tab3:
     active_tuned = sum(1 for p in master.tw_tuned.positions.values() if p['status'] == 'ACTIVE')
     pending_tuned = sum(1 for p in master.tw_tuned.positions.values() if p['status'] == 'PENDING_ENTRY')
 
-    f1, f2, f3, f4 = st.columns(4)
+    # Calculate Win Rate
+    win_rate_c, wins_c, losses_c = 0.0, 0, 0
+    if not df_tuned_led.empty and 'Net_PnL_INR' in df_tuned_led.columns:
+        wins_c = len(df_tuned_led[df_tuned_led['Net_PnL_INR'] > 0])
+        losses_c = len(df_tuned_led[df_tuned_led['Net_PnL_INR'] <= 0])
+        total_c = wins_c + losses_c
+        win_rate_c = (wins_c / total_c * 100) if total_c > 0 else 0.0
+
+    f1, f2, f3, f4, f5 = st.columns(5)
     f1.metric("Capital Balance", f"₹{(CAPITAL_INR + net_tuned):,.2f}", f"₹{net_tuned:,.2f}")
     f2.metric("Market Exposure", f"{active_tuned} Active / {pending_tuned} Pending")
     f3.metric("Today's Trades", f"{master.tw_tuned.daily_trades} / {master.tw_tuned.max_daily_trades}")
     f4.metric("Today's PnL", f"₹{master.tw_tuned.daily_pnl_inr:,.2f}")
+    f5.metric("Win Rate (All-Time)", f"{win_rate_c:.1f}%", f"{wins_c}W / {losses_c}L")
 
     live_trades_c = []
     for p, pos in master.tw_tuned.positions.items():
