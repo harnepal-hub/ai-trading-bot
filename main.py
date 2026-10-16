@@ -79,7 +79,7 @@ def sync_trade_to_github(strat_key, trade_data)
 # ==========================================
 # MARKET DATA & COSTS
 # ==========================================
-def fetch_crypto_data(ticker, interval, period=5d)
+def fetch_crypto_data(ticker, interval, period="5d")
     try
         df = yf.download(tickers=ticker, period=period, interval=interval, progress=False)
         if df.empty return pd.DataFrame()
