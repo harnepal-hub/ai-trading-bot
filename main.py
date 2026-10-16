@@ -15,7 +15,8 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # GLOBAL CONFIGURATION
 # ==========================================
-PAIRS = ["B-BTC_USDT", "B-ETH_USDT", "B-SOL_USDT", "B-XRP_USDT", "B-ADA_USDT"]
+# EVOLUTION: Pruned B-ETH_USDT to eliminate toxic asset drawdown
+PAIRS = ["B-BTC_USDT", "B-SOL_USDT", "B-XRP_USDT", "B-ADA_USDT"]
 CAPITAL_INR = 100000.00
 RISK_PER_TRADE_INR = 250.00
 USDT_INR_RATE = 86.00 
@@ -24,9 +25,16 @@ MAKER_FEE = 0.00025
 TAKER_FEE = 0.00050  
 SLIPPAGE_RATE = 0.0005 
 
-AMTE_LEDGER = "amte_ledger.csv"
-TW_LEDGER = "tw_ledger.csv"
-TW_TUNED_LEDGER = "tw_tuned_ledger.csv"
+# OPTION 1: V2 Ledger Split for clean forward-testing
+AMTE_LEDGER = "amte_v2_ledger.csv"
+TW_LEDGER = "tw_v2_ledger.csv"
+TW_TUNED_LEDGER = "tw_tuned_v2_ledger.csv"
+
+LEDGERS = {
+    "AMTE": AMTE_LEDGER,
+    "TW_ORIG": TW_LEDGER,
+    "TW_TUNED": TW_TUNED_LEDGER
+}
 
 # ==========================================
 # CORE API FETCH & UTILS
@@ -189,7 +197,7 @@ class AMTEBot:
                     self.place_limit(pair, 'SHORT', lp, sl, tp, risk_usd / max(0.0001, (sl - lp)), atr)
 
     def place_limit(self, pair, side, lp, sl, tp, size, atr):
-        # EVOLUTION: Pull trailing stop trigger to 1.0x ATR to lock profits faster
+        # EVOLUTION: Trailing stop trigger at 1.0x ATR to lock profits early
         be_trig = lp + (atr * 1.0) if side == 'LONG' else lp - (atr * 1.0)
         cost_buf = lp * ((MAKER_FEE * 2) + TAKER_FEE)
         self.positions[pair] = {
@@ -252,7 +260,7 @@ class TWAllInOneBot:
         for pair in self.pairs:
             df = fetch_live_data(pair, "15m", 120)
             time.sleep(0.3)
-            df_macro = fetch_live_data(pair, "1h", 100) # Added for Short Baseline Filter
+            df_macro = fetch_live_data(pair, "1h", 100) # Fetched for Short Baseline Filter
             time.sleep(0.3)
             if df.empty or df_macro.empty or len(df) < 105: continue
             
@@ -374,7 +382,7 @@ class TWTunedBot:
         for pair in self.pairs:
             df = fetch_live_data(pair, "15m", 120)
             time.sleep(0.3)
-            df_macro = fetch_live_data(pair, "1h", 100) # Added for Short Baseline Filter
+            df_macro = fetch_live_data(pair, "1h", 100) # Fetched for Short Baseline Filter
             time.sleep(0.3)
             if df.empty or df_macro.empty or len(df) < 105: continue
             
@@ -506,7 +514,6 @@ st.set_page_config(page_title="AMTE Quantitative Terminal", layout="wide")
 st.title("⚡ AMTE Quantitative Multi-Model Terminal")
 st.caption("Engine is actively running in the background. 🛡️ Evolved Baseline & Trailing Stops Active.")
 
-# EVOLUTION: Added 4th Tab for Analytics
 tab1, tab2, tab3, tab4 = st.tabs(["⚡ Strategy A: AMTE BB Pullback", "🎯 Strategy B: TW Original", "🛠️ Strategy C: TW Fine-Tuned", "🧬 Evolution Analytics"])
 
 # ------------------------------------------
@@ -573,7 +580,7 @@ with tab1:
         st.plotly_chart(fig_a, use_container_width=True)
 
     if not df_amte_led.empty:
-        st.download_button(label="📥 Download AMTE Ledger", data=df_amte_led.to_csv(index=False).encode('utf-8'), file_name='amte_ledger.csv', mime='text/csv')
+        st.download_button(label="📥 Download AMTE Ledger", data=df_amte_led.to_csv(index=False).encode('utf-8'), file_name=AMTE_LEDGER, mime='text/csv')
         st.dataframe(df_amte_led.sort_index(ascending=False), use_container_width=True)
 
 # ------------------------------------------
@@ -639,7 +646,7 @@ with tab2:
         st.plotly_chart(fig_b, use_container_width=True)
 
     if not df_tw_led.empty:
-        st.download_button(label="📥 Download TW Orig Ledger", data=df_tw_led.to_csv(index=False).encode('utf-8'), file_name='tw_ledger.csv', mime='text/csv')
+        st.download_button(label="📥 Download TW Orig Ledger", data=df_tw_led.to_csv(index=False).encode('utf-8'), file_name=TW_LEDGER, mime='text/csv')
         st.dataframe(df_tw_led.sort_index(ascending=False), use_container_width=True)
 
 # ------------------------------------------
@@ -705,33 +712,32 @@ with tab3:
         st.plotly_chart(fig_c, use_container_width=True)
 
     if not df_tuned_led.empty:
-        st.download_button(label="📥 Download TW Tuned Ledger", data=df_tuned_led.to_csv(index=False).encode('utf-8'), file_name='tw_tuned_ledger.csv', mime='text/csv')
+        st.download_button(label="📥 Download TW Tuned Ledger", data=df_tuned_led.to_csv(index=False).encode('utf-8'), file_name=TW_TUNED_LEDGER, mime='text/csv')
         st.dataframe(df_tuned_led.sort_index(ascending=False), use_container_width=True)
 
 # ------------------------------------------
-# TAB 4: EVOLUTION ANALYTICS (NEW)
+# TAB 4: EVOLUTION ANALYTICS
 # ------------------------------------------
 with tab4:
     st.subheader("🧬 Strategy Evolution Sandbox")
     st.markdown("Simulate the mathematical impact of new rules against your historical ledger data.")
     
-    if os.path.exists(AMTE_LEDGER):
-        df_amt = pd.read_csv(AMTE_LEDGER)
+    file_to_load = 'amte_ledger.csv' if os.path.exists('amte_ledger.csv') else ('amt data.csv' if os.path.exists('amt data.csv') else None)
+
+    if file_to_load:
+        df_amt = pd.read_csv(file_to_load)
         
-        # Guard against completely empty ledgers
         if not df_amt.empty and 'Net_PnL_INR' in df_amt.columns:
             df_amt['Time'] = pd.to_datetime(df_amt['Time'])
             df_amt = df_amt.sort_values('Time').reset_index(drop=True)
             
             st.markdown("### 🎛️ Control Panel")
             c_a, c_b, c_c = st.columns(3)
-            # Default to B-ETH_USDT if it exists in the data, else empty list
             default_prune = ['B-ETH_USDT'] if 'B-ETH_USDT' in df_amt['Pair'].unique() else []
             pruned_assets = c_a.multiselect("Prune Toxic Assets", df_amt['Pair'].unique(), default=default_prune)
             ts_boost = c_b.slider("Trailing Stop Boost Multiplier", 1.0, 2.0, 1.5, 0.1, help="Simulates capturing peak momentum before a timeout exit.")
             short_save = c_c.slider("Short Filter Avoidance Rate", 0.0, 1.0, 0.5, 0.1, help="Simulates percentage of losing shorts prevented by the EMA50 baseline.")
 
-            # Math Calculations
             df_proj = df_amt[~df_amt['Pair'].isin(pruned_assets)].copy()
             df_proj.loc[df_proj['Reason'] == 'Timeout (Profit)', 'Gross_USD'] *= ts_boost
             df_proj['New_Net_USD'] = df_proj['Gross_USD'] - df_proj['Fees_USD'] - df_proj['Slippage_USD']
@@ -740,7 +746,6 @@ with tab4:
             short_loss_mask = (df_proj['Side'] == 'SHORT') & (df_proj['Reason'] == 'Stop Market') & (df_proj['New_Net_INR'] < 0)
             df_proj.loc[short_loss_mask, 'New_Net_INR'] *= (1.0 - short_save)
 
-            # Equity Curve Visualization
             st.markdown("### 📈 Cumulative Equity Curves")
             df_amt['Cum_Orig'] = df_amt['Net_PnL_INR'].cumsum()
             df_proj['Cum_Proj'] = df_proj['New_Net_INR'].cumsum()
@@ -751,11 +756,10 @@ with tab4:
             fig_evo.update_layout(height=400, template="plotly_dark", margin=dict(l=10, r=10, t=30, b=10))
             st.plotly_chart(fig_evo, use_container_width=True)
 
-            # Performance Heatmap
             st.markdown("### 🔥 Asset Performance Heatmap (Projected)")
             summary = df_proj.groupby('Pair').agg(Trades=('New_Net_INR', 'count'), Win_Rate=('New_Net_INR', lambda x: (x > 0).mean() * 100), Net_PnL_INR=('New_Net_INR', 'sum')).reset_index()
             st.dataframe(summary, use_container_width=True)
         else:
-            st.info("AMTE Ledger exists but contains no trade data yet.")
+            st.info("Historical data exists but contains no valid trade records yet.")
     else:
-        st.warning("⚠️ The Evolution Sandbox will activate as soon as the bot logs its first trade to `amte_ledger.csv`.")
+        st.warning("⚠️ The Evolution Sandbox relies on historical CSV data to render projections.")
