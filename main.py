@@ -1,681 +1,303 @@
 import os
 import time
-import math
+import base64
 import threading
 import warnings
-from datetime import datetime, date
+import math
+from datetime import datetime
+import pytz
 import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
+import yfinance as yf
 
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# GLOBAL CONFIGURATION
+# CONFIGURATION & SECRETS
 # ==========================================
-PAIRS = ["B-BTC_USDT", "B-ETH_USDT", "B-SOL_USDT", "B-XRP_USDT", "B-ADA_USDT"]
-CAPITAL_INR = 100000.00
-RISK_PER_TRADE_INR = 250.00
-USDT_INR_RATE = 86.00 
+PAIRS = [BTC-USD, ETH-USD, SOL-USD, BNB-USD, XRP-USD]
+CAPITAL_USD = 5000.00
+RISK_PER_TRADE_USD = 25.00
 
-MAKER_FEE = 0.00025  
-TAKER_FEE = 0.00050  
-SLIPPAGE_RATE = 0.0005 
+IST = pytz.timezone('AsiaKolkata')
 
-AMTE_LEDGER = "amte_ledger.csv"
-TW_LEDGER = "tw_ledger.csv"
-TW_TUNED_LEDGER = "tw_tuned_ledger.csv"
+GITHUB_TOKEN = st.secrets.get(GITHUB_TOKEN, os.getenv(GITHUB_TOKEN, ))
+REPO_NAME = st.secrets.get(REPO_NAME, os.getenv(REPO_NAME, ))
+
+LEDGERS = {
+    AMTE crypto_amte_ledger.csv,
+    TW_ORIG crypto_tw_orig_ledger.csv,
+    TW_TUNED crypto_tw_tuned_ledger.csv
+}
+
+TELEGRAM_BOT_TOKEN = st.secrets.get(TELEGRAM_BOT_TOKEN, os.getenv(TELEGRAM_BOT_TOKEN, ))
+TELEGRAM_CHAT_ID = st.secrets.get(TELEGRAM_CHAT_ID, os.getenv(TELEGRAM_CHAT_ID, ))
+LEDGER_COLUMNS = ['Time', 'Asset', 'Strategy', 'Side', 'Qty', 'Entry', 'Exit', 'Reason', 'Gross_USD', 'Exchange_Fee_USD', 'Net_PnL_USD', 'Max_DD_USD']
+
+def send_telegram_alert(message)
+    if not TELEGRAM_BOT_TOKEN return
+    url = fhttpsapi.telegram.orgbot{TELEGRAM_BOT_TOKEN}sendMessage
+    payload = {chat_id TELEGRAM_CHAT_ID, text message, parse_mode HTML}
+    try requests.post(url, json=payload, timeout=5)
+    except pass
 
 # ==========================================
-# CORE API FETCH & UTILS
+# GITHUB PERSISTENT SYNC (NO LOCAL SAVES)
 # ==========================================
-def fetch_live_data(pair, interval, limit=120):
-    url = f"https://public.coindcx.com/market_data/candles?pair={pair}&interval={interval}&limit={limit}"
-    # CRITICAL FIX: User-Agent prevents CoinDCX from blocking the chart data
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        if isinstance(data, dict): return pd.DataFrame()
-        df = pd.DataFrame(data)
-        df = df.sort_values(by='time').reset_index(drop=True)
-        df['datetime'] = pd.to_datetime(df['time'], unit='ms')
-        df.set_index(pd.DatetimeIndex(df["datetime"]), inplace=True)
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df
-    except: return pd.DataFrame()
+def load_ledger_from_github(strat_key)
+    filename = LEDGERS[strat_key]
+    if not GITHUB_TOKEN or not REPO_NAME return pd.DataFrame(columns=LEDGER_COLUMNS)
+    url = fhttpsapi.github.comrepos{REPO_NAME}contents{filename}
+    headers = {Authorization ftoken {GITHUB_TOKEN}, Accept applicationvnd.github.v3+json}
+    res = requests.get(url, headers=headers)
+    if res.status_code == 200
+        content = base64.b64decode(res.json()[content]).decode(utf-8)
+        from io import StringIO
+        return pd.read_csv(StringIO(content))
+    return pd.DataFrame(columns=LEDGER_COLUMNS)
 
-def log_trade(filename, trade_data):
+def sync_trade_to_github(strat_key, trade_data)
+    filename = LEDGERS[strat_key]
+    df_existing = load_ledger_from_github(strat_key)
     df_new = pd.DataFrame([trade_data])
-    if os.path.exists(filename):
-        try:
-            df_old = pd.read_csv(filename)
-            df_combined = pd.concat([df_old, df_new], ignore_index=True)
-            df_combined.to_csv(filename, index=False)
-        except Exception:
-            df_new.to_csv(filename, mode='a', header=False, index=False)
-    else:
-        df_new.to_csv(filename, index=False)
+    df_combined = pd.concat([df_existing, df_new], ignore_index=True) if not df_existing.empty else df_new
+    csv_str = df_combined.to_csv(index=False)
+    
+    if not GITHUB_TOKEN or not REPO_NAME return
+    url = fhttpsapi.github.comrepos{REPO_NAME}contents{filename}
+    headers = {Authorization ftoken {GITHUB_TOKEN}, Accept applicationvnd.github.v3+json}
+    res = requests.get(url, headers=headers)
+    sha = res.json().get(sha) if res.status_code == 200 else None
+    
+    payload = {message fAuto-log {strat_key} trade {trade_data.get('Asset')}, content base64.b64encode(csv_str.encode(utf-8)).decode(utf-8)}
+    if sha payload[sha] = sha
+    requests.put(url, headers=headers, json=payload, timeout=10)
 
-def calculate_ehma(series, length=16):
-    half_len = max(1, length // 2)
+# ==========================================
+# MARKET DATA & COSTS
+# ==========================================
+def fetch_crypto_data(ticker, interval, period=5d)
+    try
+        df = yf.download(tickers=ticker, period=period, interval=interval, progress=False)
+        if df.empty return pd.DataFrame()
+        df.reset_index(inplace=True)
+        if isinstance(df.columns, pd.MultiIndex) df.columns = df.columns.droplevel(1)
+        df.rename(columns={'Datetime' 'datetime', 'Open' 'open', 'High' 'high', 'Low' 'low', 'Close' 'close', 'Volume' 'volume'}, inplace=True)
+        df.set_index('datetime', inplace=True)
+        for col in ['open', 'high', 'low', 'close', 'volume'] df[col] = df[col].astype(float)
+        return df
+    except return pd.DataFrame()
+
+def calculate_crypto_costs(entry_price, exit_price, quantity)
+    return ((entry_price  quantity)  0.0005) + ((exit_price  quantity)  0.0005)
+
+def calculate_ehma(series, length=16)
+    half_len = max(1, length  2)
     sqrt_len = max(1, int(round(math.sqrt(length))))
-    ema_half = series.ewm(span=half_len, adjust=False).mean()
-    ema_full = series.ewm(span=length, adjust=False).mean()
-    diff = 2 * ema_half - ema_full
-    return diff.ewm(span=sqrt_len, adjust=False).mean()
-
-def calculate_pivots(df, left=33, right=21, quick_right=3):
-    highs = df['high'].values
-    lows = df['low'].values
-    n = len(df)
-    last_p_high, last_p_low, last_q_high, last_q_low = np.nan, np.nan, np.nan, np.nan
-    for i in range(left, n - right):
-        if all(highs[i] >= highs[i - left:i]) and all(highs[i] >= highs[i+1:i + right + 1]):
-            last_p_high = highs[i]
-        if all(lows[i] <= lows[i - left:i]) and all(lows[i] <= lows[i+1:i + right + 1]):
-            last_p_low = lows[i]
-    for i in range(left, n - quick_right):
-        if all(highs[i] >= highs[i - left:i]) and all(highs[i] >= highs[i+1:i + quick_right + 1]):
-            last_q_high = highs[i]
-        if all(lows[i] <= lows[i - left:i]) and all(lows[i] <= lows[i+1:i + quick_right + 1]):
-            last_q_low = lows[i]
-    return last_p_high, last_p_low, last_q_high, last_q_low
+    return (2  series.ewm(span=half_len, adjust=False).mean() - series.ewm(span=length, adjust=False).mean()).ewm(span=sqrt_len, adjust=False).mean()
 
 # ==========================================
-# STRATEGY 1: AMTE BB PULLBACK
+# EVOLVED TRADING ENGINE (247)
 # ==========================================
-class AMTEBot:
-    def __init__(self, pairs):
+class UnifiedCryptoEngine
+    def __init__(self, pairs)
         self.pairs = pairs
-        self.positions = {pair: {'status': 'NONE'} for pair in pairs}
-        self.current_date = date.today()
-        self.daily_trades = 0
-        self.daily_pnl_inr = 0.0
+        self.strats = [AMTE, TW_ORIG, TW_TUNED]
+        self.positions = {s {p {'status' 'NONE'} for p in pairs} for s in self.strats}
+        self.current_date = datetime.now(IST).date()
+        self.daily_metrics = {s {'trades' 0, 'pnl' 0.0} for s in self.strats}
         self.max_daily_trades = 10 
-        self.max_daily_loss = -2000.00
-        self.max_concurrent = 2
+        self.max_daily_loss = -100.00 
+        self.max_concurrent = 3
 
-    def check_daily_reset(self):
-        today = date.today()
-        if today != self.current_date:
-            self.current_date = today
-            self.daily_trades = 0
-            self.daily_pnl_inr = 0.0
-            for p in self.positions:
-                if self.positions[p]['status'] == 'PENDING_ENTRY':
-                    self.positions[p] = {'status': 'NONE'}
+    def check_daily_reset(self, today_ist)
+        if today_ist != self.current_date
+            self.current_date = today_ist
+            for s in self.strats
+                self.daily_metrics[s] = {'trades' 0, 'pnl' 0.0}
+                for p in self.pairs
+                    if self.positions[s][p]['status'] == 'PENDING_ENTRY'
+                        self.positions[s][p] = {'status' 'NONE'}
 
-    def process_cycle(self):
-        self.check_daily_reset()
-        kill_active = self.daily_trades >= self.max_daily_trades or self.daily_pnl_inr <= self.max_daily_loss
-        active_count = sum(1 for p in self.positions.values() if p['status'] == 'ACTIVE')
-
-        for pair in self.pairs:
-            df_macro = fetch_live_data(pair, "1h", 100)
-            time.sleep(0.3)
-            df_micro = fetch_live_data(pair, "15m", 100)
-            time.sleep(0.3)
-            if df_macro.empty or df_micro.empty: continue
-
-            df_macro['EMA_20'] = df_macro['close'].ewm(span=20, adjust=False).mean()
-            df_macro['EMA_50'] = df_macro['close'].ewm(span=50, adjust=False).mean()
-            df_macro['spread'] = (df_macro['EMA_20'] - df_macro['EMA_50']).abs() / df_macro['close'] * 100
-            
-            c_macro = df_macro.iloc[-2]
-            is_bull = (c_macro['EMA_20'] > c_macro['EMA_50']) and (c_macro['spread'] > 0.05)
-            is_bear = (c_macro['EMA_20'] < c_macro['EMA_50']) and (c_macro['spread'] > 0.05)
-
-            df_micro['SMA20'] = df_micro['close'].rolling(20).mean()
-            df_micro['STD20'] = df_micro['close'].rolling(20).std()
-            df_micro['BBL'] = df_micro['SMA20'] - (df_micro['STD20'] * 1.5)
-            df_micro['BBU'] = df_micro['SMA20'] + (df_micro['STD20'] * 1.5)
-            tr = pd.concat([df_micro['high'] - df_micro['low'], (df_micro['high'] - df_micro['close'].shift()).abs(), (df_micro['low'] - df_micro['close'].shift()).abs()], axis=1).max(axis=1)
-            df_micro['ATR'] = tr.rolling(14).mean()
-            
-            c_micro = df_micro.iloc[-2]
-            live_price = df_micro.iloc[-1]['close']
-            pos = self.positions[pair]
-
-            if pos['status'] == 'ACTIVE':
-                ep = pos['limit_price']
-                floating_usd = (live_price - ep) * pos['size'] if pos['side'] == 'LONG' else (ep - live_price) * pos['size']
-                floating_fees = (ep * pos['size'] * MAKER_FEE) + (live_price * pos['size'] * TAKER_FEE)
-                self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
-
-                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 4:
-                    if (floating_usd - floating_fees) > 0:
-                        self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
-                        continue
-                
-                if not pos.get('be_moved', False):
-                    if (pos['side'] == 'LONG' and live_price >= pos['be_trig']) or (pos['side'] == 'SHORT' and live_price <= pos['be_trig']):
-                        self.positions[pair]['sl'] = pos['be_sl']
-                        self.positions[pair]['be_moved'] = True
-                if pos['side'] == 'LONG':
-                    if live_price <= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
-                    elif live_price >= pos['tp']: self.close_trade(pair, pos['tp'], "Limit TP", "MAKER")
-                else:
-                    if live_price >= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
-                    elif live_price <= pos['tp']: self.close_trade(pair, pos['tp'], "Limit TP", "MAKER")
-                continue
-
-            if pos['status'] == 'PENDING_ENTRY':
-                if (pos['side'] == 'LONG' and not is_bull) or (pos['side'] == 'SHORT' and not is_bear):
-                    self.positions[pair] = {'status': 'NONE'}
-                    continue
-                if pos['side'] == 'LONG' and df_micro.iloc[-1]['low'] <= pos['limit_price']: self.activate_trade(pair)
-                elif pos['side'] == 'SHORT' and df_micro.iloc[-1]['high'] >= pos['limit_price']: self.activate_trade(pair)
-                continue
-
-            if kill_active or active_count >= self.max_concurrent: continue
-            
-            risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
-            atr = c_micro['ATR']
-            if is_bull and live_price > c_micro['BBL']:
-                lp = c_micro['BBL']
-                sl, tp = lp - (atr * 2.0), lp + (atr * 4.0)
-                self.place_limit(pair, 'LONG', lp, sl, tp, risk_usd / max(0.0001, (lp - sl)), atr)
-            elif is_bear and live_price < c_micro['BBU']:
-                lp = c_micro['BBU']
-                sl, tp = lp + (atr * 2.0), lp - (atr * 4.0)
-                self.place_limit(pair, 'SHORT', lp, sl, tp, risk_usd / max(0.0001, (sl - lp)), atr)
-
-    def place_limit(self, pair, side, lp, sl, tp, size, atr):
-        be_trig = lp + (atr * 2.0) if side == 'LONG' else lp - (atr * 2.0)
-        cost_buf = lp * ((MAKER_FEE * 2) + TAKER_FEE)
-        self.positions[pair] = {
-            'status': 'PENDING_ENTRY', 'side': side, 'limit_price': lp, 'sl': sl, 'tp': tp, 
-            'size': size, 'be_trig': be_trig, 'be_sl': lp + cost_buf if side == 'LONG' else lp - cost_buf, 
-            'be_moved': False, 'max_dd_inr': 0.0
-        }
-
-    def activate_trade(self, pair):
-        self.positions[pair].update({'status': 'ACTIVE', 'entry_time': datetime.now(), 'max_dd_inr': 0.0})
-        self.daily_trades += 1
-
-    def close_trade(self, pair, exec_price, reason, order_type):
-        pos = self.positions[pair]
-        ep = pos['limit_price']
-        exit_p = exec_price * (1 - (SLIPPAGE_RATE if order_type == "TAKER" else 0.0)) if pos['side'] == 'LONG' else exec_price * (1 + (SLIPPAGE_RATE if order_type == "TAKER" else 0.0))
-        gross = (exit_p - ep) * pos['size'] if pos['side'] == 'LONG' else (ep - exit_p) * pos['size']
-        fees = (ep * pos['size'] * MAKER_FEE) + (exit_p * pos['size'] * (MAKER_FEE if order_type == "MAKER" else TAKER_FEE))
-        net_inr = (gross - fees) * USDT_INR_RATE
-        self.daily_pnl_inr += net_inr
+    def process_cycle(self)
+        now_ist = datetime.now(IST)
+        self.check_daily_reset(now_ist.date())
         
-        log_trade(AMTE_LEDGER, {
-            'Time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'Pair': pair, 'Side': pos['side'],
-            'Entry': round(ep, 2), 'Exit': round(exit_p, 2), 'Reason': reason,
-            'Gross_USD': round(gross, 2), 'Fees_USD': round(fees, 2),
-            'Slippage_USD': round(abs(exec_price - exit_p) * pos['size'], 2), 
-            'Net_PnL_INR': round(net_inr, 2), 'Max_DD_INR': round(pos.get('max_dd_inr', 0.0), 2)
-        })
-        self.positions[pair] = {'status': 'NONE'}
+        for pair in self.pairs
+            df_15m = fetch_crypto_data(pair, 15m, 5d)
+            df_1h = fetch_crypto_data(pair, 1h, 1mo)
+            time.sleep(1) 
+            if df_15m.empty or df_1h.empty or len(df_15m)  105 continue
 
-# ==========================================
-# STRATEGY 2: TW ORIGINAL (2-BAR LAG)
-# ==========================================
-class TWAllInOneBot:
-    def __init__(self, pairs):
-        self.pairs = pairs
-        self.positions = {pair: {'status': 'NONE'} for pair in pairs}
-        self.current_date = date.today()
-        self.daily_trades = 0
-        self.daily_pnl_inr = 0.0
-        self.max_daily_trades = 10 
-        self.max_daily_loss = -2000.00 
-        self.max_concurrent = 3
+            df_1h['EMA20'] = df_1h['close'].ewm(span=20, adjust=False).mean()
+            df_1h['EMA50'] = df_1h['close'].ewm(span=50, adjust=False).mean()
+            macro_trend = UP if df_1h.iloc[-1]['EMA20']  df_1h.iloc[-1]['EMA50'] else DOWN
 
-    def check_daily_reset(self):
-        today = date.today()
-        if today != self.current_date:
-            self.current_date = today
-            self.daily_trades = 0
-            self.daily_pnl_inr = 0.0
-            for p in self.positions:
-                if self.positions[p]['status'] == 'PENDING_ENTRY':
-                    self.positions[p] = {'status': 'NONE'}
+            df_15m['EMA100'] = df_15m['close'].ewm(span=100, adjust=False).mean()
+            df_15m['MHULL'] = calculate_ehma(df_15m['close'], 16)
+            df_15m['SHULL_2'] = df_15m['MHULL'].shift(2)
+            df_15m['SHULL_3'] = df_15m['MHULL'].shift(3)
+            
+            df_15m['SMA20'] = df_15m['close'].rolling(20).mean()
+            df_15m['STD20'] = df_15m['close'].rolling(20).std()
+            df_15m['Upper_BB'] = df_15m['SMA20'] + (df_15m['STD20']  1.5)
+            df_15m['Lower_BB'] = df_15m['SMA20'] - (df_15m['STD20']  1.5)
+            
+            tr = pd.concat([df_15m['high'] - df_15m['low'], (df_15m['high'] - df_15m['close'].shift()).abs(), (df_15m['low'] - df_15m['close'].shift()).abs()], axis=1).max(axis=1)
+            df_15m['ATR'] = tr.rolling(14).mean()
+            df_15m['ATR_50'] = df_15m['ATR'].rolling(50).mean()
 
-    def process_cycle(self):
-        self.check_daily_reset()
-        kill_active = self.daily_trades >= self.max_daily_trades or self.daily_pnl_inr <= self.max_daily_loss
-        active_count = sum(1 for p in self.positions.values() if p['status'] == 'ACTIVE')
-
-        for pair in self.pairs:
-            df = fetch_live_data(pair, "15m", 120)
-            time.sleep(0.3)
-            if df.empty or len(df) < 105: continue
-
-            df['EMA100'] = df['close'].ewm(span=100, adjust=False).mean()
-            df['MHULL'] = calculate_ehma(df['close'], length=16)
-            df['SHULL'] = df['MHULL'].shift(2)
-            tr = pd.concat([df['high'] - df['low'], (df['high'] - df['close'].shift()).abs(), (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
-            df['ATR'] = tr.rolling(14).mean()
-
-            c_prev = df.iloc[-3]
-            c_curr = df.iloc[-2]
-            live_price = df.iloc[-1]['close']
-
-            buy_signal = (c_prev['SHULL'] >= c_prev['MHULL']) and (c_curr['SHULL'] < c_curr['MHULL']) and (c_curr['close'] > c_curr['EMA100'])
-            sell_signal = (c_prev['SHULL'] <= c_prev['MHULL']) and (c_curr['SHULL'] > c_curr['MHULL']) and (c_curr['close'] < c_curr['EMA100'])
-
-            pos = self.positions[pair]
-
-            if pos['status'] == 'ACTIVE':
-                ep = pos['limit_price']
-                floating_usd = (live_price - ep) * pos['size'] if pos['side'] == 'LONG' else (ep - live_price) * pos['size']
-                floating_fees = (ep * pos['size'] * MAKER_FEE) + (live_price * pos['size'] * TAKER_FEE)
-                self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
-
-                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 6:
-                    if (floating_usd - floating_fees) > 0:
-                        self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
-                        continue
-                        
-                if pos['side'] == 'LONG':
-                    if live_price <= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
-                    elif live_price >= pos['tp']: self.close_trade(pair, pos['tp'], "Limit TP", "MAKER")
-                else:
-                    if live_price >= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
-                    elif live_price <= pos['tp']: self.close_trade(pair, pos['tp'], "Limit TP", "MAKER")
-                continue
-
-            if pos['status'] == 'PENDING_ENTRY':
-                if df.iloc[-1]['low'] <= pos['limit_price'] if pos['side'] == 'LONG' else df.iloc[-1]['high'] >= pos['limit_price']:
-                    self.activate_trade(pair)
-                continue
-
-            if kill_active or active_count >= self.max_concurrent: continue
-
-            p_high, p_low, q_high, q_low = calculate_pivots(df)
+            c_prev = df_15m.iloc[-3]
+            c_curr = df_15m.iloc[-2]
+            live_price = df_15m.iloc[-1]['close']
             atr = c_curr['ATR']
-            risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
+            signals = {AMTE None, TW_ORIG None, TW_TUNED None}
 
-            if buy_signal:
-                sl = q_low if (not np.isnan(q_low) and q_low < live_price) else (live_price - atr * 1.8)
-                tp = p_high if (not np.isnan(p_high) and p_high > live_price) else (live_price + atr * 3.6)
-                self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0}
-            elif sell_signal:
-                sl = q_high if (not np.isnan(q_high) and q_high > live_price) else (live_price + atr * 1.8)
-                tp = p_low if (not np.isnan(p_low) and p_low < live_price) else (live_price - atr * 3.6)
-                self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (sl - live_price)), 'max_dd_inr': 0.0}
+            if macro_trend == UP and c_curr['low'] = c_curr['Lower_BB'] signals[AMTE] = LONG
+            elif macro_trend == DOWN and c_curr['high'] = c_curr['Upper_BB'] signals[AMTE] = SHORT
+            if (c_prev['SHULL_2'] = c_prev['MHULL']) and (c_curr['SHULL_2']  c_curr['MHULL']) and (c_curr['close']  c_curr['EMA100']) signals[TW_ORIG] = LONG
+            elif (c_prev['SHULL_2'] = c_prev['MHULL']) and (c_curr['SHULL_2']  c_curr['MHULL']) and (c_curr['close']  c_curr['EMA100']) signals[TW_ORIG] = SHORT
+            if (c_prev['SHULL_3'] = c_prev['MHULL']) and (c_curr['SHULL_3']  c_curr['MHULL']) and (c_curr['close']  c_curr['EMA100']) and (c_curr['ATR']  c_curr['ATR_50']) signals[TW_TUNED] = LONG
+            elif (c_prev['SHULL_3'] = c_prev['MHULL']) and (c_curr['SHULL_3']  c_curr['MHULL']) and (c_curr['close']  c_curr['EMA100']) and (c_curr['ATR']  c_curr['ATR_50']) signals[TW_TUNED] = SHORT
 
-    def activate_trade(self, pair):
-        self.positions[pair].update({'status': 'ACTIVE', 'entry_time': datetime.now(), 'max_dd_inr': 0.0})
-        self.daily_trades += 1
+            for strat in self.strats
+                # EVOLUTION Strict Baseline Filter for Shorts
+                if signals[strat] == SHORT and live_price  df_1h.iloc[-1]['EMA50']
+                    signals[strat] = None 
 
-    def close_trade(self, pair, exec_price, reason, order_type):
-        pos = self.positions[pair]
-        ep = pos['limit_price']
-        exit_p = exec_price * (1 - (SLIPPAGE_RATE if order_type == "TAKER" else 0.0)) if pos['side'] == 'LONG' else exec_price * (1 + (SLIPPAGE_RATE if order_type == "TAKER" else 0.0))
-        gross = (exit_p - ep) * pos['size'] if pos['side'] == 'LONG' else (ep - exit_p) * pos['size']
-        fees = (ep * pos['size'] * MAKER_FEE) + (exit_p * pos['size'] * (MAKER_FEE if order_type == "MAKER" else TAKER_FEE))
-        net_inr = (gross - fees) * USDT_INR_RATE
-        self.daily_pnl_inr += net_inr
+                pos = self.positions[strat][pair]
+                if pos['status'] == 'ACTIVE'
+                    ep = pos['limit_price']
+                    gross = (live_price - ep)  pos['size'] if pos['side'] == 'LONG' else (ep - live_price)  pos['size']
+                    self.positions[strat][pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), gross - calculate_crypto_costs(ep, live_price, pos['size']))
 
-        log_trade(TW_LEDGER, {
-            'Time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'Pair': pair, 'Side': pos['side'],
-            'Entry': round(ep, 2), 'Exit': round(exit_p, 2), 'Reason': reason,
-            'Gross_USD': round(gross, 2), 'Fees_USD': round(fees, 2),
-            'Slippage_USD': round(abs(exec_price - exit_p) * pos['size'], 2), 
-            'Net_PnL_INR': round(net_inr, 2), 'Max_DD_INR': round(pos.get('max_dd_inr', 0.0), 2)
-        })
-        self.positions[pair] = {'status': 'NONE'}
-
-# ==========================================
-# STRATEGY 3: TW FINE-TUNED (3-BAR LAG + ATR FILTER)
-# ==========================================
-class TWTunedBot:
-    def __init__(self, pairs):
-        self.pairs = pairs
-        self.positions = {pair: {'status': 'NONE'} for pair in pairs}
-        self.current_date = date.today()
-        self.daily_trades = 0
-        self.daily_pnl_inr = 0.0
-        self.max_daily_trades = 10 
-        self.max_daily_loss = -2000.00 
-        self.max_concurrent = 3
-
-    def check_daily_reset(self):
-        today = date.today()
-        if today != self.current_date:
-            self.current_date = today
-            self.daily_trades = 0
-            self.daily_pnl_inr = 0.0
-            for p in self.positions:
-                if self.positions[p]['status'] == 'PENDING_ENTRY':
-                    self.positions[p] = {'status': 'NONE'}
-
-    def process_cycle(self):
-        self.check_daily_reset()
-        kill_active = self.daily_trades >= self.max_daily_trades or self.daily_pnl_inr <= self.max_daily_loss
-        active_count = sum(1 for p in self.positions.values() if p['status'] == 'ACTIVE')
-
-        for pair in self.pairs:
-            df = fetch_live_data(pair, "15m", 120)
-            time.sleep(0.3)
-            if df.empty or len(df) < 105: continue
-
-            df['EMA100'] = df['close'].ewm(span=100, adjust=False).mean()
-            df['MHULL'] = calculate_ehma(df['close'], length=16)
-            df['SHULL'] = df['MHULL'].shift(3) 
-            tr = pd.concat([df['high'] - df['low'], (df['high'] - df['close'].shift()).abs(), (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
-            df['ATR'] = tr.rolling(14).mean()
-            df['ATR_50'] = df['ATR'].rolling(50).mean()
-
-            c_prev = df.iloc[-3]
-            c_curr = df.iloc[-2]
-            live_price = df.iloc[-1]['close']
-
-            buy_signal = (c_prev['SHULL'] >= c_prev['MHULL']) and (c_curr['SHULL'] < c_curr['MHULL']) and \
-                         (c_curr['close'] > c_curr['EMA100']) and (c_curr['close'] > c_curr['MHULL']) and \
-                         (c_curr['ATR'] > c_curr['ATR_50'])
-                         
-            sell_signal = (c_prev['SHULL'] <= c_prev['MHULL']) and (c_curr['SHULL'] > c_curr['MHULL']) and \
-                          (c_curr['close'] < c_curr['EMA100']) and (c_curr['close'] < c_curr['MHULL']) and \
-                          (c_curr['ATR'] > c_curr['ATR_50'])
-
-            pos = self.positions[pair]
-
-            if pos['status'] == 'ACTIVE':
-                ep = pos['limit_price']
-                floating_usd = (live_price - ep) * pos['size'] if pos['side'] == 'LONG' else (ep - live_price) * pos['size']
-                floating_fees = (ep * pos['size'] * MAKER_FEE) + (live_price * pos['size'] * TAKER_FEE)
-                self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
-
-                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 6:
-                    if (floating_usd - floating_fees) > 0:
-                        self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
-                        continue
+                    # EVOLUTION ATR Trailing Stop Mechanics
+                    if pos['side'] == 'LONG'
+                        if live_price = ep + (atr  1.0) and pos['sl']  ep
+                            pos['sl'] = ep + (atr  0.1) # Lock breakeven + fee coverage
                         
-                if pos['side'] == 'LONG':
-                    if live_price <= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
-                    elif live_price >= pos['tp']: self.close_trade(pair, pos['tp'], "Limit TP", "MAKER")
-                else:
-                    if live_price >= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
-                    elif live_price <= pos['tp']: self.close_trade(pair, pos['tp'], "Limit TP", "MAKER")
-                continue
+                        if live_price = pos['sl'] self.close_trade(strat, pair, pos['sl'], Trailing SL if pos['sl']  ep else Stop Market)
+                        elif live_price = pos['tp'] self.close_trade(strat, pair, pos['tp'], Limit TP)
+                    else
+                        if live_price = ep - (atr  1.0) and pos['sl']  ep
+                            pos['sl'] = ep - (atr  0.1)
+                            
+                        if live_price = pos['sl'] self.close_trade(strat, pair, pos['sl'], Trailing SL if pos['sl']  ep else Stop Market)
+                        elif live_price = pos['tp'] self.close_trade(strat, pair, pos['tp'], Limit TP)
+                    continue
 
-            if pos['status'] == 'PENDING_ENTRY':
-                if df.iloc[-1]['low'] <= pos['limit_price'] if pos['side'] == 'LONG' else df.iloc[-1]['high'] >= pos['limit_price']:
-                    self.activate_trade(pair)
-                continue
+                if pos['status'] == 'PENDING_ENTRY'
+                    if df_15m.iloc[-1]['low'] = pos['limit_price'] if pos['side'] == 'LONG' else df_15m.iloc[-1]['high'] = pos['limit_price']
+                        self.positions[strat][pair].update({'status' 'ACTIVE', 'entry_time' now_ist, 'max_dd_inr' 0.0})
+                        self.daily_metrics[strat]['trades'] += 1
+                        send_telegram_alert(f🟢 b[CRYPTO {strat}] FILLEDbnAsset {pair}nPrice ${pos['limit_price'],.4f})
+                    continue
 
-            if kill_active or active_count >= self.max_concurrent: continue
+                kill_active = self.daily_metrics[strat]['trades'] = self.max_daily_trades or self.daily_metrics[strat]['pnl'] = self.max_daily_loss
+                if not kill_active and sum(1 for p in self.positions[strat].values() if p['status'] == 'ACTIVE')  self.max_concurrent and signals[strat]
+                    limit_p = c_curr['Lower_BB'] if signals[strat] == LONG and strat == AMTE else live_price
+                    limit_p = c_curr['Upper_BB'] if signals[strat] == SHORT and strat == AMTE else limit_p
+                    sl = limit_p - (atr  1.0) if signals[strat] == LONG else limit_p + (atr  1.0)
+                    tp = limit_p + (atr  4.0) if signals[strat] == LONG else limit_p - (atr  4.0)
+                    self.positions[strat][pair] = {'status' 'PENDING_ENTRY', 'side' signals[strat], 'limit_price' limit_p, 'sl' sl, 'tp' tp, 'size' RISK_PER_TRADE_USD  max(0.0001, abs(limit_p - sl)), 'max_dd_inr' 0.0}
 
-            p_high, p_low, q_high, q_low = calculate_pivots(df)
-            atr = c_curr['ATR']
-            risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
-
-            if buy_signal:
-                sl = q_low if (not np.isnan(q_low) and q_low < live_price) else (live_price - atr * 1.8)
-                tp = p_high if (not np.isnan(p_high) and p_high > live_price) else (live_price + atr * 3.6)
-                self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0}
-            elif sell_signal:
-                sl = q_high if (not np.isnan(q_high) and q_high > live_price) else (live_price + atr * 1.8)
-                tp = p_low if (not np.isnan(p_low) and p_low < live_price) else (live_price - atr * 3.6)
-                self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (sl - live_price)), 'max_dd_inr': 0.0}
-
-    def activate_trade(self, pair):
-        self.positions[pair].update({'status': 'ACTIVE', 'entry_time': datetime.now(), 'max_dd_inr': 0.0})
-        self.daily_trades += 1
-
-    def close_trade(self, pair, exec_price, reason, order_type):
-        pos = self.positions[pair]
-        ep = pos['limit_price']
-        exit_p = exec_price * (1 - (SLIPPAGE_RATE if order_type == "TAKER" else 0.0)) if pos['side'] == 'LONG' else exec_price * (1 + (SLIPPAGE_RATE if order_type == "TAKER" else 0.0))
-        gross = (exit_p - ep) * pos['size'] if pos['side'] == 'LONG' else (ep - exit_p) * pos['size']
-        fees = (ep * pos['size'] * MAKER_FEE) + (exit_p * pos['size'] * (MAKER_FEE if order_type == "MAKER" else TAKER_FEE))
-        net_inr = (gross - fees) * USDT_INR_RATE
-        self.daily_pnl_inr += net_inr
-
-        log_trade(TW_TUNED_LEDGER, {
-            'Time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'Pair': pair, 'Side': pos['side'],
-            'Entry': round(ep, 2), 'Exit': round(exit_p, 2), 'Reason': reason,
-            'Gross_USD': round(gross, 2), 'Fees_USD': round(fees, 2),
-            'Slippage_USD': round(abs(exec_price - exit_p) * pos['size'], 2), 
-            'Net_PnL_INR': round(net_inr, 2), 'Max_DD_INR': round(pos.get('max_dd_inr', 0.0), 2)
-        })
-        self.positions[pair] = {'status': 'NONE'}
-
-# ==========================================
-# MASTER CONTINUOUS ENGINE RUNNER
-# ==========================================
-class MasterEngine:
-    def __init__(self):
-        self.amte = AMTEBot(PAIRS)
-        self.tw_orig = TWAllInOneBot(PAIRS)
-        self.tw_tuned = TWTunedBot(PAIRS)
-
-    def loop(self):
-        time.sleep(5)
-        while True:
-            try:
-                self.amte.process_cycle()
-                self.tw_orig.process_cycle()
-                self.tw_tuned.process_cycle()
-                time.sleep(60)
-            except:
-                time.sleep(60)
+    def close_trade(self, strat, pair, exec_price, reason)
+        pos = self.positions[strat][pair]
+        ep, qty = pos['limit_price'], pos['size']
+        gross = (exec_price - ep)  qty if pos['side'] == 'LONG' else (ep - exec_price)  qty
+        costs = calculate_crypto_costs(ep, exec_price, qty)
+        net_usd = gross - costs
+        self.daily_metrics[strat]['pnl'] += net_usd
+        trade_record = {'Time' datetime.now(IST).strftime(%Y-%m-%d %H%M%S), 'Asset' pair, 'Strategy' strat, 'Side' pos['side'], 'Qty' round(qty, 4), 'Entry' round(ep, 4), 'Exit' round(exec_price, 4), 'Reason' reason, 'Gross_USD' round(gross, 2), 'Exchange_Fee_USD' round(costs, 2), 'Net_PnL_USD' round(net_usd, 2), 'Max_DD_USD' round(pos.get('max_dd_inr', 0.0), 2)}
+        sync_trade_to_github(strat, trade_record)
+        self.positions[strat][pair] = {'status' 'NONE'}
 
 @st.cache_resource
-def start_master_engine():
-    engine = MasterEngine()
-    t = threading.Thread(target=engine.loop, daemon=True)
+def get_engine() return UnifiedCryptoEngine(PAIRS)
+engine = get_engine()
+
+@st.cache_resource
+def start_background_loop(_engine)
+    for t in threading.enumerate()
+        if t.name == CryptoTraderThread return t 
+    def loop()
+        time.sleep(5)
+        while True
+            try
+                _engine.process_cycle()
+                time.sleep(300)
+            except time.sleep(300)
+    t = threading.Thread(target=loop, daemon=True, name=CryptoTraderThread)
     t.start()
-    return engine
-
-master = start_master_engine()
+    return t
+start_background_loop(engine)
 
 # ==========================================
-# STREAMLIT UI: 3 FULLY WORKING TABS
+# STREAMLIT UI & EVOLUTION ANALYTICS
 # ==========================================
-st.set_page_config(page_title="AMTE Quantitative Terminal", layout="wide")
-st.title("⚡ AMTE Quantitative Multi-Model Terminal")
-st.caption("Engine is actively running in the background.")
+st.set_page_config(page_title=Crypto Multi-Model Terminal, layout=wide)
+st.title(🪙 Crypto Multi-Model Terminal)
+st.caption(fCurrent Time (IST) {datetime.now(IST).strftime('%Y-%m-%d %I%M %p')}  🟢 Market 247  🛡️ Evolved Baseline & Trailing Stops Active)
+st.markdown(---)
 
-tab1, tab2, tab3 = st.tabs(["⚡ Strategy A: AMTE BB Pullback", "🎯 Strategy B: TW Original", "🛠️ Strategy C: TW Fine-Tuned"])
+tabs = st.tabs([Strategy A (AMTE), Strategy B (TW Orig), Strategy C (TW Tuned), 🧬 Evolution Analytics])
 
-# ------------------------------------------
-# TAB 1: AMTE BB PULLBACK
-# ------------------------------------------
-with tab1:
-    df_amte_led = pd.read_csv(AMTE_LEDGER) if os.path.exists(AMTE_LEDGER) else pd.DataFrame()
-    net_amte = df_amte_led['Net_PnL_INR'].sum() if not df_amte_led.empty and 'Net_PnL_INR' in df_amte_led.columns else 0.0
-    active_amte = sum(1 for p in master.amte.positions.values() if p['status'] == 'ACTIVE')
-    pending_amte = sum(1 for p in master.amte.positions.values() if p['status'] == 'PENDING_ENTRY')
-    
-    win_rate_a, wins_a, losses_a = 0.0, 0, 0
-    if not df_amte_led.empty and 'Net_PnL_INR' in df_amte_led.columns:
-        wins_a = len(df_amte_led[df_amte_led['Net_PnL_INR'] > 0])
-        losses_a = len(df_amte_led[df_amte_led['Net_PnL_INR'] <= 0])
-        total_a = wins_a + losses_a
-        win_rate_a = (wins_a / total_a * 100) if total_a > 0 else 0.0
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Capital Balance", f"₹{(CAPITAL_INR + net_amte):,.2f}", f"₹{net_amte:,.2f}")
-    c2.metric("Market Exposure", f"{active_amte} Active / {pending_amte} Pending")
-    c3.metric("Today's Trades", f"{master.amte.daily_trades} / {master.amte.max_daily_trades}")
-    c4.metric("Today's PnL", f"₹{master.amte.daily_pnl_inr:,.2f}")
-    c5.metric("Win Rate (All-Time)", f"{win_rate_a:.1f}%", f"{wins_a}W / {losses_a}L")
-
-    live_trades_a = []
-    for p, pos in master.amte.positions.items():
-        if pos['status'] != 'NONE':
-            live_trades_a.append({
-                "Pair": p, "Status": pos['status'], "Side": pos.get('side', '-'),
-                "Target Entry": f"${pos.get('limit_price', 0):,.2f}",
-                "Take Profit": f"${pos.get('tp', 0):,.2f}",
-                "Stop Loss": f"${pos.get('sl', 0):,.2f}"
-            })
-    if live_trades_a:
-        st.write("🟢 **Currently Running & Pending Trades**")
-        st.dataframe(pd.DataFrame(live_trades_a), use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.subheader("📊 15m Bollinger Band Pullback Routing")
-    pair_a = st.selectbox("Select Asset Pair (Strategy A):", PAIRS, key="pair_a")
-    df_chart_a = fetch_live_data(pair_a, "15m", 100)
-    
-    if not df_chart_a.empty:
-        df_chart_a['SMA20'] = df_chart_a['close'].rolling(20).mean()
-        df_chart_a['STD20'] = df_chart_a['close'].rolling(20).std()
-        df_chart_a['BBL'] = df_chart_a['SMA20'] - (df_chart_a['STD20'] * 1.5)
-        df_chart_a['BBU'] = df_chart_a['SMA20'] + (df_chart_a['STD20'] * 1.5)
-
-        fig_a = go.Figure()
-        fig_a.add_trace(go.Candlestick(x=df_chart_a.index, open=df_chart_a['open'], high=df_chart_a['high'], low=df_chart_a['low'], close=df_chart_a['close'], name="15m Candles"))
-        fig_a.add_trace(go.Scatter(x=df_chart_a.index, y=df_chart_a['BBU'], line=dict(color='rgba(150, 150, 150, 0.5)', width=1), name="Upper BB"))
-        fig_a.add_trace(go.Scatter(x=df_chart_a.index, y=df_chart_a['BBL'], line=dict(color='rgba(150, 150, 150, 0.5)', width=1), fill='tonexty', fillcolor='rgba(100, 100, 255, 0.05)', name="Lower BB"))
+# RENDER STANDARD TABS
+for i, strat in enumerate([AMTE, TW_ORIG, TW_TUNED])
+    with tabs[i]
+        df_led = load_ledger_from_github(strat)
+        net_pnl = df_led['Net_PnL_USD'].sum() if not df_led.empty else 0.0
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(Capital Balance, f${(CAPITAL_USD + net_pnl),.2f}, f${net_pnl,.2f})
+        c2.metric(Market Exposure, f{sum(1 for p in engine.positions[strat].values() if p['status'] == 'ACTIVE')} Active  {sum(1 for p in engine.positions[strat].values() if p['status'] == 'PENDING_ENTRY')} Pending)
+        c3.metric(Today's Trades, f{engine.daily_metrics[strat]['trades']}  {engine.max_daily_trades})
+        c4.metric(Today's PnL, f${engine.daily_metrics[strat]['pnl'],.2f})
         
-        pos_a = master.amte.positions[pair_a]
-        if pos_a['status'] == 'PENDING_ENTRY':
-            fig_a.add_hline(y=pos_a['limit_price'], line_dash="dot", line_color="#BDBDBD", annotation_text=f"Limit: ${pos_a['limit_price']:,.2f}")
-        elif pos_a['status'] == 'ACTIVE':
-            fig_a.add_hline(y=pos_a['limit_price'], line_dash="solid", line_color="#FF9800", annotation_text=f"Entry: ${pos_a['limit_price']:,.2f}")
-            fig_a.add_hline(y=pos_a['tp'], line_dash="dash", line_color="#00E676", annotation_text=f"TP: ${pos_a['tp']:,.2f}")
-            fig_a.add_hline(y=pos_a['sl'], line_dash="dash", line_color="#FF5252", annotation_text=f"SL: ${pos_a['sl']:,.2f}")
+        if df_led.empty st.dataframe(pd.DataFrame(columns=LEDGER_COLUMNS), use_container_width=True)
+        else st.dataframe(df_led.sort_index(ascending=False), use_container_width=True)
 
-        fig_a.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
-        st.plotly_chart(fig_a, use_container_width=True)
-
-    if not df_amte_led.empty:
-        st.download_button(label="📥 Download AMTE Ledger", data=df_amte_led.to_csv(index=False).encode('utf-8'), file_name='amte_ledger.csv', mime='text/csv')
-        st.dataframe(df_amte_led.sort_index(ascending=False), use_container_width=True)
-
-# ------------------------------------------
-# TAB 2: TW ALL-IN-ONE (ORIGINAL)
-# ------------------------------------------
-with tab2:
-    df_tw_led = pd.read_csv(TW_LEDGER) if os.path.exists(TW_LEDGER) else pd.DataFrame()
-    net_tw = df_tw_led['Net_PnL_INR'].sum() if not df_tw_led.empty and 'Net_PnL_INR' in df_tw_led.columns else 0.0
-    active_tw = sum(1 for p in master.tw_orig.positions.values() if p['status'] == 'ACTIVE')
-    pending_tw = sum(1 for p in master.tw_orig.positions.values() if p['status'] == 'PENDING_ENTRY')
+# RENDER EVOLUTION ANALYTICS TAB
+with tabs[3]
+    st.subheader(🧬 Strategy Evolution Sandbox)
+    st.markdown(Simulate the mathematical impact of new rules against your historical `amt data.csv` dataset.)
     
-    win_rate_b, wins_b, losses_b = 0.0, 0, 0
-    if not df_tw_led.empty and 'Net_PnL_INR' in df_tw_led.columns:
-        wins_b = len(df_tw_led[df_tw_led['Net_PnL_INR'] > 0])
-        losses_b = len(df_tw_led[df_tw_led['Net_PnL_INR'] <= 0])
-        total_b = wins_b + losses_b
-        win_rate_b = (wins_b / total_b * 100) if total_b > 0 else 0.0
+    if os.path.exists('amt data.csv')
+        df_amt = pd.read_csv('amt data.csv')
+        df_amt['Time'] = pd.to_datetime(df_amt['Time'])
+        df_amt = df_amt.sort_values('Time').reset_index(drop=True)
+        
+        st.markdown(### 🎛️ Control Panel)
+        c1, c2, c3 = st.columns(3)
+        pruned_assets = c1.multiselect(Prune Toxic Assets, df_amt['Pair'].unique(), default=['B-ETH_USDT'])
+        ts_boost = c2.slider(Trailing Stop Boost Multiplier, 1.0, 2.0, 1.5, 0.1, help=Simulates capturing peak momentum before a timeout exit.)
+        short_save = c3.slider(Short Filter Avoidance Rate, 0.0, 1.0, 0.5, 0.1, help=Simulates percentage of losing shorts prevented by the EMA50 baseline.)
 
-    t1, t2, t3, t4, t5 = st.columns(5)
-    t1.metric("Capital Balance", f"₹{(CAPITAL_INR + net_tw):,.2f}", f"₹{net_tw:,.2f}")
-    t2.metric("Market Exposure", f"{active_tw} Active / {pending_tw} Pending")
-    t3.metric("Today's Trades", f"{master.tw_orig.daily_trades} / {master.tw_orig.max_daily_trades}")
-    t4.metric("Today's PnL", f"₹{master.tw_orig.daily_pnl_inr:,.2f}")
-    t5.metric("Win Rate (All-Time)", f"{win_rate_b:.1f}%", f"{wins_b}W / {losses_b}L")
+        # Math Calculations
+        df_proj = df_amt[~df_amt['Pair'].isin(pruned_assets)].copy()
+        df_proj.loc[df_proj['Reason'] == 'Timeout (Profit)', 'Gross_USD'] = ts_boost
+        df_proj['New_Net_USD'] = df_proj['Gross_USD'] - df_proj['Fees_USD'] - df_proj['Slippage_USD']
+        df_proj['New_Net_INR'] = df_proj['New_Net_USD']  81.52 # Implied historical conversion rate
+        
+        short_loss_mask = (df_proj['Side'] == 'SHORT') & (df_proj['Reason'] == 'Stop Market') & (df_proj['New_Net_INR']  0)
+        df_proj.loc[short_loss_mask, 'New_Net_INR'] = (1.0 - short_save)
 
-    live_trades_b = []
-    for p, pos in master.tw_orig.positions.items():
-        if pos['status'] != 'NONE':
-            live_trades_b.append({
-                "Pair": p, "Status": pos['status'], "Side": pos.get('side', '-'),
-                "Target Entry": f"${pos.get('limit_price', 0):,.2f}",
-                "Take Profit": f"${pos.get('tp', 0):,.2f}",
-                "Stop Loss": f"${pos.get('sl', 0):,.2f}"
-            })
-    if live_trades_b:
-        st.write("🟢 **Currently Running & Pending Trades**")
-        st.dataframe(pd.DataFrame(live_trades_b), use_container_width=True, hide_index=True)
+        # Equity Curve Visualization
+        st.markdown(### 📈 Cumulative Equity Curves)
+        df_amt['Cum_Orig'] = df_amt['Net_PnL_INR'].cumsum()
+        df_proj['Cum_Proj'] = df_proj['New_Net_INR'].cumsum()
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(y=df_amt['Cum_Orig'], name='Original Framework', line=dict(color='#FF5252', dash='dot')))
+        fig.add_trace(go.Scatter(y=df_proj['Cum_Proj'], name='Evolved Framework', line=dict(color='#00E676', width=3)))
+        fig.update_layout(height=400, template=plotly_dark, margin=dict(l=10, r=10, t=30, b=10))
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("---")
-    st.subheader("📊 TW Original (2-Bar Lag)")
-    pair_b = st.selectbox("Select Asset Pair (Strategy B):", PAIRS, key="pair_b")
-    df_chart_b = fetch_live_data(pair_b, "15m", 120)
-
-    if not df_chart_b.empty and len(df_chart_b) >= 105:
-        df_chart_b['EMA100'] = df_chart_b['close'].ewm(span=100, adjust=False).mean()
-        df_chart_b['MHULL'] = calculate_ehma(df_chart_b['close'], 16)
-        df_chart_b['SHULL'] = df_chart_b['MHULL'].shift(2)
-
-        fig_b = go.Figure()
-        fig_b.add_trace(go.Candlestick(x=df_chart_b.index, open=df_chart_b['open'], high=df_chart_b['high'], low=df_chart_b['low'], close=df_chart_b['close'], name="15m Candles"))
-        fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['MHULL'], line=dict(color='#0018F3', width=2), name="MHULL"))
-        fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['SHULL'], line=dict(color='#FF4B4B', width=1.5, dash='dot'), name="SHULL (2 Lag)"))
-        fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['EMA100'], line=dict(color='#9C27B0', width=2), name="EMA 100"))
-
-        pos_b = master.tw_orig.positions[pair_b]
-        if pos_b['status'] == 'PENDING_ENTRY': fig_b.add_hline(y=pos_b['limit_price'], line_dash="dot", line_color="#BDBDBD", annotation_text="Limit")
-        elif pos_b['status'] == 'ACTIVE':
-            fig_b.add_hline(y=pos_b['limit_price'], line_dash="solid", line_color="#FF9800", annotation_text="Entry")
-            fig_b.add_hline(y=pos_b['tp'], line_dash="dash", line_color="#00E676", annotation_text="TP")
-            fig_b.add_hline(y=pos_b['sl'], line_dash="dash", line_color="#FF5252", annotation_text="SL")
-
-        fig_b.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
-        st.plotly_chart(fig_b, use_container_width=True)
-
-    if not df_tw_led.empty:
-        st.download_button(label="📥 Download TW Orig Ledger", data=df_tw_led.to_csv(index=False).encode('utf-8'), file_name='tw_ledger.csv', mime='text/csv')
-        st.dataframe(df_tw_led.sort_index(ascending=False), use_container_width=True)
-
-# ------------------------------------------
-# TAB 3: TW FINE-TUNED (STRATEGY C)
-# ------------------------------------------
-with tab3:
-    df_tuned_led = pd.read_csv(TW_TUNED_LEDGER) if os.path.exists(TW_TUNED_LEDGER) else pd.DataFrame()
-    net_tuned = df_tuned_led['Net_PnL_INR'].sum() if not df_tuned_led.empty and 'Net_PnL_INR' in df_tuned_led.columns else 0.0
-    active_tuned = sum(1 for p in master.tw_tuned.positions.values() if p['status'] == 'ACTIVE')
-    pending_tuned = sum(1 for p in master.tw_tuned.positions.values() if p['status'] == 'PENDING_ENTRY')
-
-    win_rate_c, wins_c, losses_c = 0.0, 0, 0
-    if not df_tuned_led.empty and 'Net_PnL_INR' in df_tuned_led.columns:
-        wins_c = len(df_tuned_led[df_tuned_led['Net_PnL_INR'] > 0])
-        losses_c = len(df_tuned_led[df_tuned_led['Net_PnL_INR'] <= 0])
-        total_c = wins_c + losses_c
-        win_rate_c = (wins_c / total_c * 100) if total_c > 0 else 0.0
-
-    f1, f2, f3, f4, f5 = st.columns(5)
-    f1.metric("Capital Balance", f"₹{(CAPITAL_INR + net_tuned):,.2f}", f"₹{net_tuned:,.2f}")
-    f2.metric("Market Exposure", f"{active_tuned} Active / {pending_tuned} Pending")
-    f3.metric("Today's Trades", f"{master.tw_tuned.daily_trades} / {master.tw_tuned.max_daily_trades}")
-    f4.metric("Today's PnL", f"₹{master.tw_tuned.daily_pnl_inr:,.2f}")
-    f5.metric("Win Rate (All-Time)", f"{win_rate_c:.1f}%", f"{wins_c}W / {losses_c}L")
-
-    live_trades_c = []
-    for p, pos in master.tw_tuned.positions.items():
-        if pos['status'] != 'NONE':
-            live_trades_c.append({
-                "Pair": p, "Status": pos['status'], "Side": pos.get('side', '-'),
-                "Target Entry": f"${pos.get('limit_price', 0):,.2f}",
-                "Take Profit": f"${pos.get('tp', 0):,.2f}",
-                "Stop Loss": f"${pos.get('sl', 0):,.2f}"
-            })
-    if live_trades_c:
-        st.write("🟢 **Currently Running & Pending Trades**")
-        st.dataframe(pd.DataFrame(live_trades_c), use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.subheader("📊 TW Fine-Tuned (3-Bar Lag + ATR Volatility Filter)")
-    pair_c = st.selectbox("Select Asset Pair (Strategy C):", PAIRS, key="pair_c")
-    df_chart_c = fetch_live_data(pair_c, "15m", 120)
-
-    if not df_chart_c.empty and len(df_chart_c) >= 105:
-        df_chart_c['EMA100'] = df_chart_c['close'].ewm(span=100, adjust=False).mean()
-        df_chart_c['MHULL'] = calculate_ehma(df_chart_c['close'], 16)
-        df_chart_c['SHULL'] = df_chart_c['MHULL'].shift(3) 
-
-        fig_c = go.Figure()
-        fig_c.add_trace(go.Candlestick(x=df_chart_c.index, open=df_chart_c['open'], high=df_chart_c['high'], low=df_chart_c['low'], close=df_chart_c['close'], name="15m Candles"))
-        fig_c.add_trace(go.Scatter(x=df_chart_c.index, y=df_chart_c['MHULL'], line=dict(color='#0018F3', width=2), name="MHULL"))
-        fig_c.add_trace(go.Scatter(x=df_chart_c.index, y=df_chart_c['SHULL'], line=dict(color='#00E676', width=1.5, dash='dot'), name="SHULL (3 Lag)"))
-        fig_c.add_trace(go.Scatter(x=df_chart_c.index, y=df_chart_c['EMA100'], line=dict(color='#9C27B0', width=2), name="EMA 100"))
-
-        pos_c = master.tw_tuned.positions[pair_c]
-        if pos_c['status'] == 'PENDING_ENTRY': fig_c.add_hline(y=pos_c['limit_price'], line_dash="dot", line_color="#BDBDBD", annotation_text="Limit")
-        elif pos_c['status'] == 'ACTIVE':
-            fig_c.add_hline(y=pos_c['limit_price'], line_dash="solid", line_color="#FF9800", annotation_text="Entry")
-            fig_c.add_hline(y=pos_c['tp'], line_dash="dash", line_color="#00E676", annotation_text="TP")
-            fig_c.add_hline(y=pos_c['sl'], line_dash="dash", line_color="#FF5252", annotation_text="SL")
-
-        fig_c.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
-        st.plotly_chart(fig_c, use_container_width=True)
-
-    if not df_tuned_led.empty:
-        st.download_button(label="📥 Download TW Tuned Ledger", data=df_tuned_led.to_csv(index=False).encode('utf-8'), file_name='tw_tuned_ledger.csv', mime='text/csv')
-        st.dataframe(df_tuned_led.sort_index(ascending=False), use_container_width=True)
-    else:
-        st.info("No trades executed yet under TW Fine-Tuned (Strategy C).")
+        # Performance Heatmap
+        st.markdown(### 🔥 Asset Performance Heatmap (Projected))
+        summary = df_proj.groupby('Pair').agg(Trades=('New_Net_INR', 'count'), Win_Rate=('New_Net_INR', lambda x (x  0).mean()  100), Net_PnL_INR=('New_Net_INR', 'sum')).reset_index()
+        st.dataframe(summary.style.background_gradient(cmap='RdYlGn', subset=['Win_Rate', 'Net_PnL_INR']), use_container_width=True)
+    else
+        st.warning(⚠️ Upload `amt data.csv` to your GitHub repository root folder to unlock the interactive Evolution Sandbox.)
