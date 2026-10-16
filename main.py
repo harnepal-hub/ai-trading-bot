@@ -754,7 +754,7 @@ with tab4:
             # Performance Heatmap
             st.markdown("### 🔥 Asset Performance Heatmap (Projected)")
             summary = df_proj.groupby('Pair').agg(Trades=('New_Net_INR', 'count'), Win_Rate=('New_Net_INR', lambda x: (x > 0).mean() * 100), Net_PnL_INR=('New_Net_INR', 'sum')).reset_index()
-            st.dataframe(summary.style.background_gradient(cmap='RdYlGn', subset=['Win_Rate', 'Net_PnL_INR']), use_container_width=True)
+            st.dataframe(summary, use_container_width=True)
         else:
             st.info("AMTE Ledger exists but contains no trade data yet.")
     else:
