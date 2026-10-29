@@ -23,30 +23,38 @@ USDT_INR_RATE = 86.00
 MAKER_FEE = 0.00025  
 TAKER_FEE = 0.00050  
 SLIPPAGE_RATE = 0.0005 
-SLIPPAGE_BUFFER = 0.0005 # V2.1 Fix: Ensures Breakevens are Positive
+SLIPPAGE_BUFFER = 0.0005 # V2.1 Fix: Ensures Breakevens are mathematically positive
 
 AMTE_LEDGER = "amte_v2_ledger.csv"
 TW_LEDGER = "tw_v2_ledger.csv"
 TW_TUNED_LEDGER = "tw_tuned_v2_ledger.csv"
 
 # ==========================================
-# CORE API FETCH & UTILS
+# CORE API FETCH & UTILS (WITH AUTO-RETRY)
 # ==========================================
-def fetch_live_data(pair, interval, limit=120):
+def fetch_live_data(pair, interval, limit=120, retries=2):
+    # Added a retry loop to prevent blank charts if CoinDCX drops a single request
     url = f"https://public.coindcx.com/market_data/candles?pair={pair}&interval={interval}&limit={limit}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        if isinstance(data, dict): return pd.DataFrame()
-        df = pd.DataFrame(data)
-        df = df.sort_values(by='time').reset_index(drop=True)
-        df['datetime'] = pd.to_datetime(df['time'], unit='ms')
-        df.set_index(pd.DatetimeIndex(df["datetime"]), inplace=True)
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df
-    except: return pd.DataFrame()
+    
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            data = response.json()
+            if isinstance(data, dict): 
+                time.sleep(0.5)
+                continue # Retry if CoinDCX sends an error dictionary instead of chart data
+            df = pd.DataFrame(data)
+            df = df.sort_values(by='time').reset_index(drop=True)
+            df['datetime'] = pd.to_datetime(df['time'], unit='ms')
+            df.set_index(pd.DatetimeIndex(df["datetime"]), inplace=True)
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            return df
+        except:
+            time.sleep(0.5) # Wait half a second before retrying
+            
+    return pd.DataFrame() # Returns empty only if all retries fail completely
 
 def log_trade(filename, trade_data):
     df_new = pd.DataFrame([trade_data])
@@ -95,7 +103,7 @@ class AMTEBot:
         self.current_date = date.today()
         self.daily_trades = 0
         self.daily_pnl_inr = 0.0
-        self.max_daily_trades = 15 # Scaled up for 5m frequency
+        self.max_daily_trades = 15 
         self.max_daily_loss = -2000.00
         self.max_concurrent = 2
 
@@ -117,7 +125,7 @@ class AMTEBot:
         for pair in self.pairs:
             df_macro = fetch_live_data(pair, "1h", 100) # Macro safety remains 1H
             time.sleep(0.3)
-            df_micro = fetch_live_data(pair, "5m", 100) # Micro entry scaled to 5m
+            df_micro = fetch_live_data(pair, "5m", 120) # Micro entry scaled to 5m (Limit fixed to 120)
             time.sleep(0.3)
             if df_macro.empty or df_micro.empty: continue
 
@@ -146,7 +154,6 @@ class AMTEBot:
                 floating_fees = (ep * pos['size'] * MAKER_FEE) + (live_price * pos['size'] * TAKER_FEE)
                 self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
 
-                # Scaled Timeout for 5m chart
                 if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 2:
                     if (floating_usd - floating_fees) > 0:
                         self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
@@ -179,7 +186,7 @@ class AMTEBot:
             atr = c_micro['ATR']
             
             if is_bull and live_price > c_micro['BBL']:
-                # V2.1 Dual Macro Filter protects Longs
+                # V2.1 Fix: Dual Macro Filter protects Longs
                 if live_price > df_macro.iloc[-1]['EMA_50']:
                     lp = c_micro['BBL']
                     sl, tp = lp - (atr * 2.0), lp + (atr * 4.0)
@@ -192,7 +199,6 @@ class AMTEBot:
 
     def place_limit(self, pair, side, lp, sl, tp, size, atr):
         be_trig = lp + (atr * 1.0) if side == 'LONG' else lp - (atr * 1.0)
-        # V2.1 Fix: Slippage buffer ensures breakevens close strictly positive
         cost_buf = lp * ((MAKER_FEE * 2) + TAKER_FEE + SLIPPAGE_BUFFER)
         self.positions[pair] = {
             'status': 'PENDING_ENTRY', 'side': side, 'limit_price': lp, 'sl': sl, 'tp': tp, 
@@ -252,7 +258,7 @@ class TWAllInOneBot:
         active_count = sum(1 for p in self.positions.values() if p['status'] == 'ACTIVE')
 
         for pair in self.pairs:
-            df = fetch_live_data(pair, "5m", 120) # Scaled to 5m
+            df = fetch_live_data(pair, "5m", 120) 
             time.sleep(0.3)
             df_macro = fetch_live_data(pair, "1h", 100) 
             time.sleep(0.3)
@@ -373,7 +379,7 @@ class TWTunedBot:
         active_count = sum(1 for p in self.positions.values() if p['status'] == 'ACTIVE')
 
         for pair in self.pairs:
-            df = fetch_live_data(pair, "5m", 120) # Scaled to 5m
+            df = fetch_live_data(pair, "5m", 120) 
             time.sleep(0.3)
             df_macro = fetch_live_data(pair, "1h", 100) 
             time.sleep(0.3)
@@ -547,7 +553,7 @@ with tab1:
     st.markdown("---")
     st.subheader("📊 5m Bollinger Band Pullback Routing")
     pair_a = st.selectbox("Select Asset Pair (Strategy A):", PAIRS, key="pair_a")
-    df_chart_a = fetch_live_data(pair_a, "5m", 100)
+    df_chart_a = fetch_live_data(pair_a, "5m", 120) # Limit synced to 120 to fix chart crash
     
     if not df_chart_a.empty:
         df_chart_a['SMA20'] = df_chart_a['close'].rolling(20).mean()
@@ -570,6 +576,8 @@ with tab1:
 
         fig_a.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
         st.plotly_chart(fig_a, use_container_width=True)
+    else:
+        st.info("Chart data is loading... CoinDCX API rate limit in effect. Please wait 60 seconds.")
 
     if not df_amte_led.empty:
         st.download_button(label="📥 Download AMTE Ledger", data=df_amte_led.to_csv(index=False).encode('utf-8'), file_name=AMTE_LEDGER, mime='text/csv')
@@ -636,6 +644,8 @@ with tab2:
 
         fig_b.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
         st.plotly_chart(fig_b, use_container_width=True)
+    else:
+        st.info("Chart data is loading... CoinDCX API rate limit in effect. Please wait 60 seconds.")
 
     if not df_tw_led.empty:
         st.download_button(label="📥 Download TW Orig Ledger", data=df_tw_led.to_csv(index=False).encode('utf-8'), file_name=TW_LEDGER, mime='text/csv')
@@ -702,6 +712,8 @@ with tab3:
 
         fig_c.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
         st.plotly_chart(fig_c, use_container_width=True)
+    else:
+        st.info("Chart data is loading... CoinDCX API rate limit in effect. Please wait 60 seconds.")
 
     if not df_tuned_led.empty:
         st.download_button(label="📥 Download TW Tuned Ledger", data=df_tuned_led.to_csv(index=False).encode('utf-8'), file_name=TW_TUNED_LEDGER, mime='text/csv')
