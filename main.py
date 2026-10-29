@@ -15,7 +15,6 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # GLOBAL CONFIGURATION
 # ==========================================
-# Pruned B-ETH_USDT to eliminate toxic asset drawdown
 PAIRS = ["B-BTC_USDT", "B-SOL_USDT", "B-XRP_USDT", "B-ADA_USDT"]
 CAPITAL_INR = 100000.00
 RISK_PER_TRADE_INR = 250.00
@@ -24,17 +23,11 @@ USDT_INR_RATE = 86.00
 MAKER_FEE = 0.00025  
 TAKER_FEE = 0.00050  
 SLIPPAGE_RATE = 0.0005 
+SLIPPAGE_BUFFER = 0.0005 # V2.1 Fix: Ensures Breakevens are Positive
 
-# V2 Ledger Split for clean live forward-testing
 AMTE_LEDGER = "amte_v2_ledger.csv"
 TW_LEDGER = "tw_v2_ledger.csv"
 TW_TUNED_LEDGER = "tw_tuned_v2_ledger.csv"
-
-LEDGERS = {
-    "AMTE": AMTE_LEDGER,
-    "TW_ORIG": TW_LEDGER,
-    "TW_TUNED": TW_TUNED_LEDGER
-}
 
 # ==========================================
 # CORE API FETCH & UTILS
@@ -93,7 +86,7 @@ def calculate_pivots(df, left=33, right=21, quick_right=3):
     return last_p_high, last_p_low, last_q_high, last_q_low
 
 # ==========================================
-# STRATEGY 1: AMTE BB PULLBACK
+# STRATEGY 1: AMTE BB PULLBACK (SCALED TO 5M)
 # ==========================================
 class AMTEBot:
     def __init__(self, pairs):
@@ -102,7 +95,7 @@ class AMTEBot:
         self.current_date = date.today()
         self.daily_trades = 0
         self.daily_pnl_inr = 0.0
-        self.max_daily_trades = 10 
+        self.max_daily_trades = 15 # Scaled up for 5m frequency
         self.max_daily_loss = -2000.00
         self.max_concurrent = 2
 
@@ -122,9 +115,9 @@ class AMTEBot:
         active_count = sum(1 for p in self.positions.values() if p['status'] == 'ACTIVE')
 
         for pair in self.pairs:
-            df_macro = fetch_live_data(pair, "1h", 100)
+            df_macro = fetch_live_data(pair, "1h", 100) # Macro safety remains 1H
             time.sleep(0.3)
-            df_micro = fetch_live_data(pair, "15m", 100)
+            df_micro = fetch_live_data(pair, "5m", 100) # Micro entry scaled to 5m
             time.sleep(0.3)
             if df_macro.empty or df_micro.empty: continue
 
@@ -153,12 +146,12 @@ class AMTEBot:
                 floating_fees = (ep * pos['size'] * MAKER_FEE) + (live_price * pos['size'] * TAKER_FEE)
                 self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
 
-                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 4:
+                # Scaled Timeout for 5m chart
+                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 2:
                     if (floating_usd - floating_fees) > 0:
                         self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
                         continue
                 
-                # Execute 1.0x ATR Dynamic Trailing Stop
                 if not pos.get('be_moved', False):
                     if (pos['side'] == 'LONG' and live_price >= pos['be_trig']) or (pos['side'] == 'SHORT' and live_price <= pos['be_trig']):
                         self.positions[pair]['sl'] = pos['be_sl']
@@ -186,20 +179,21 @@ class AMTEBot:
             atr = c_micro['ATR']
             
             if is_bull and live_price > c_micro['BBL']:
-                lp = c_micro['BBL']
-                sl, tp = lp - (atr * 2.0), lp + (atr * 4.0)
-                self.place_limit(pair, 'LONG', lp, sl, tp, risk_usd / max(0.0001, (lp - sl)), atr)
+                # V2.1 Dual Macro Filter protects Longs
+                if live_price > df_macro.iloc[-1]['EMA_50']:
+                    lp = c_micro['BBL']
+                    sl, tp = lp - (atr * 2.0), lp + (atr * 4.0)
+                    self.place_limit(pair, 'LONG', lp, sl, tp, risk_usd / max(0.0001, (lp - sl)), atr)
             elif is_bear and live_price < c_micro['BBU']:
-                # Strict Baseline Filter for Shorts
                 if live_price < df_macro.iloc[-1]['EMA_50']:
                     lp = c_micro['BBU']
                     sl, tp = lp + (atr * 2.0), lp - (atr * 4.0)
                     self.place_limit(pair, 'SHORT', lp, sl, tp, risk_usd / max(0.0001, (sl - lp)), atr)
 
     def place_limit(self, pair, side, lp, sl, tp, size, atr):
-        # Trailing stop trigger at 1.0x ATR to lock profits early
         be_trig = lp + (atr * 1.0) if side == 'LONG' else lp - (atr * 1.0)
-        cost_buf = lp * ((MAKER_FEE * 2) + TAKER_FEE)
+        # V2.1 Fix: Slippage buffer ensures breakevens close strictly positive
+        cost_buf = lp * ((MAKER_FEE * 2) + TAKER_FEE + SLIPPAGE_BUFFER)
         self.positions[pair] = {
             'status': 'PENDING_ENTRY', 'side': side, 'limit_price': lp, 'sl': sl, 'tp': tp, 
             'size': size, 'be_trig': be_trig, 'be_sl': lp + cost_buf if side == 'LONG' else lp - cost_buf, 
@@ -229,7 +223,7 @@ class AMTEBot:
         self.positions[pair] = {'status': 'NONE'}
 
 # ==========================================
-# STRATEGY 2: TW ORIGINAL (2-BAR LAG)
+# STRATEGY 2: TW ORIGINAL (SCALED TO 5M)
 # ==========================================
 class TWAllInOneBot:
     def __init__(self, pairs):
@@ -238,7 +232,7 @@ class TWAllInOneBot:
         self.current_date = date.today()
         self.daily_trades = 0
         self.daily_pnl_inr = 0.0
-        self.max_daily_trades = 10 
+        self.max_daily_trades = 15 
         self.max_daily_loss = -2000.00 
         self.max_concurrent = 3
 
@@ -258,9 +252,9 @@ class TWAllInOneBot:
         active_count = sum(1 for p in self.positions.values() if p['status'] == 'ACTIVE')
 
         for pair in self.pairs:
-            df = fetch_live_data(pair, "15m", 120)
+            df = fetch_live_data(pair, "5m", 120) # Scaled to 5m
             time.sleep(0.3)
-            df_macro = fetch_live_data(pair, "1h", 100) # Fetched for Short Baseline Filter
+            df_macro = fetch_live_data(pair, "1h", 100) 
             time.sleep(0.3)
             if df.empty or df_macro.empty or len(df) < 105: continue
             
@@ -286,12 +280,11 @@ class TWAllInOneBot:
                 floating_fees = (ep * pos['size'] * MAKER_FEE) + (live_price * pos['size'] * TAKER_FEE)
                 self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
 
-                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 6:
+                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 3:
                     if (floating_usd - floating_fees) > 0:
                         self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
                         continue
                         
-                # Execute 1.0x ATR Dynamic Trailing Stop
                 if not pos.get('be_moved', False):
                     if (pos['side'] == 'LONG' and live_price >= pos['be_trig']) or (pos['side'] == 'SHORT' and live_price <= pos['be_trig']):
                         self.positions[pair]['sl'] = pos['be_sl']
@@ -315,14 +308,14 @@ class TWAllInOneBot:
             p_high, p_low, q_high, q_low = calculate_pivots(df)
             atr = c_curr['ATR']
             risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
-            cost_buf = live_price * ((MAKER_FEE * 2) + TAKER_FEE)
+            cost_buf = live_price * ((MAKER_FEE * 2) + TAKER_FEE + SLIPPAGE_BUFFER)
 
             if buy_signal:
-                sl = q_low if (not np.isnan(q_low) and q_low < live_price) else (live_price - atr * 1.8)
-                tp = p_high if (not np.isnan(p_high) and p_high > live_price) else (live_price + atr * 3.6)
-                self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0, 'be_trig': live_price + (atr * 1.0), 'be_sl': live_price + cost_buf, 'be_moved': False}
+                if live_price > df_macro.iloc[-1]['EMA50']:
+                    sl = q_low if (not np.isnan(q_low) and q_low < live_price) else (live_price - atr * 1.8)
+                    tp = p_high if (not np.isnan(p_high) and p_high > live_price) else (live_price + atr * 3.6)
+                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0, 'be_trig': live_price + (atr * 1.0), 'be_sl': live_price + cost_buf, 'be_moved': False}
             elif sell_signal:
-                # Strict Baseline Filter for Shorts
                 if live_price < df_macro.iloc[-1]['EMA50']:
                     sl = q_high if (not np.isnan(q_high) and q_high > live_price) else (live_price + atr * 1.8)
                     tp = p_low if (not np.isnan(p_low) and p_low < live_price) else (live_price - atr * 3.6)
@@ -351,7 +344,7 @@ class TWAllInOneBot:
         self.positions[pair] = {'status': 'NONE'}
 
 # ==========================================
-# STRATEGY 3: TW FINE-TUNED (3-BAR LAG + ATR FILTER)
+# STRATEGY 3: TW FINE-TUNED (SCALED TO 5M)
 # ==========================================
 class TWTunedBot:
     def __init__(self, pairs):
@@ -360,7 +353,7 @@ class TWTunedBot:
         self.current_date = date.today()
         self.daily_trades = 0
         self.daily_pnl_inr = 0.0
-        self.max_daily_trades = 10 
+        self.max_daily_trades = 15 
         self.max_daily_loss = -2000.00 
         self.max_concurrent = 3
 
@@ -380,9 +373,9 @@ class TWTunedBot:
         active_count = sum(1 for p in self.positions.values() if p['status'] == 'ACTIVE')
 
         for pair in self.pairs:
-            df = fetch_live_data(pair, "15m", 120)
+            df = fetch_live_data(pair, "5m", 120) # Scaled to 5m
             time.sleep(0.3)
-            df_macro = fetch_live_data(pair, "1h", 100) # Fetched for Short Baseline Filter
+            df_macro = fetch_live_data(pair, "1h", 100) 
             time.sleep(0.3)
             if df.empty or df_macro.empty or len(df) < 105: continue
             
@@ -414,12 +407,11 @@ class TWTunedBot:
                 floating_fees = (ep * pos['size'] * MAKER_FEE) + (live_price * pos['size'] * TAKER_FEE)
                 self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
 
-                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 6:
+                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 3:
                     if (floating_usd - floating_fees) > 0:
                         self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
                         continue
                         
-                # Execute 1.0x ATR Dynamic Trailing Stop
                 if not pos.get('be_moved', False):
                     if (pos['side'] == 'LONG' and live_price >= pos['be_trig']) or (pos['side'] == 'SHORT' and live_price <= pos['be_trig']):
                         self.positions[pair]['sl'] = pos['be_sl']
@@ -443,14 +435,14 @@ class TWTunedBot:
             p_high, p_low, q_high, q_low = calculate_pivots(df)
             atr = c_curr['ATR']
             risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
-            cost_buf = live_price * ((MAKER_FEE * 2) + TAKER_FEE)
+            cost_buf = live_price * ((MAKER_FEE * 2) + TAKER_FEE + SLIPPAGE_BUFFER)
 
             if buy_signal:
-                sl = q_low if (not np.isnan(q_low) and q_low < live_price) else (live_price - atr * 1.8)
-                tp = p_high if (not np.isnan(p_high) and p_high > live_price) else (live_price + atr * 3.6)
-                self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0, 'be_trig': live_price + (atr * 1.0), 'be_sl': live_price + cost_buf, 'be_moved': False}
+                if live_price > df_macro.iloc[-1]['EMA50']:
+                    sl = q_low if (not np.isnan(q_low) and q_low < live_price) else (live_price - atr * 1.8)
+                    tp = p_high if (not np.isnan(p_high) and p_high > live_price) else (live_price + atr * 3.6)
+                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0, 'be_trig': live_price + (atr * 1.0), 'be_sl': live_price + cost_buf, 'be_moved': False}
             elif sell_signal:
-                # Strict Baseline Filter for Shorts
                 if live_price < df_macro.iloc[-1]['EMA50']:
                     sl = q_high if (not np.isnan(q_high) and q_high > live_price) else (live_price + atr * 1.8)
                     tp = p_low if (not np.isnan(p_low) and p_low < live_price) else (live_price - atr * 3.6)
@@ -512,7 +504,7 @@ master = start_master_engine()
 # ==========================================
 st.set_page_config(page_title="AMTE Quantitative Terminal", layout="wide")
 st.title("⚡ AMTE Quantitative Multi-Model Terminal")
-st.caption("Engine is actively running in the background. 🛡️ Evolved Baseline & Trailing Stops Active.")
+st.caption("Engine is actively running in the background. 🛡️ 5m Scalp Mode + Dual Macro Filter Active.")
 
 tab1, tab2, tab3, tab4 = st.tabs(["⚡ Strategy A: AMTE BB Pullback", "🎯 Strategy B: TW Original", "🛠️ Strategy C: TW Fine-Tuned", "🧬 Evolution Analytics"])
 
@@ -553,9 +545,9 @@ with tab1:
         st.dataframe(pd.DataFrame(live_trades_a), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("📊 15m Bollinger Band Pullback Routing")
+    st.subheader("📊 5m Bollinger Band Pullback Routing")
     pair_a = st.selectbox("Select Asset Pair (Strategy A):", PAIRS, key="pair_a")
-    df_chart_a = fetch_live_data(pair_a, "15m", 100)
+    df_chart_a = fetch_live_data(pair_a, "5m", 100)
     
     if not df_chart_a.empty:
         df_chart_a['SMA20'] = df_chart_a['close'].rolling(20).mean()
@@ -564,7 +556,7 @@ with tab1:
         df_chart_a['BBU'] = df_chart_a['SMA20'] + (df_chart_a['STD20'] * 1.5)
 
         fig_a = go.Figure()
-        fig_a.add_trace(go.Candlestick(x=df_chart_a.index, open=df_chart_a['open'], high=df_chart_a['high'], low=df_chart_a['low'], close=df_chart_a['close'], name="15m Candles"))
+        fig_a.add_trace(go.Candlestick(x=df_chart_a.index, open=df_chart_a['open'], high=df_chart_a['high'], low=df_chart_a['low'], close=df_chart_a['close'], name="5m Candles"))
         fig_a.add_trace(go.Scatter(x=df_chart_a.index, y=df_chart_a['BBU'], line=dict(color='rgba(150, 150, 150, 0.5)', width=1), name="Upper BB"))
         fig_a.add_trace(go.Scatter(x=df_chart_a.index, y=df_chart_a['BBL'], line=dict(color='rgba(150, 150, 150, 0.5)', width=1), fill='tonexty', fillcolor='rgba(100, 100, 255, 0.05)', name="Lower BB"))
         
@@ -620,9 +612,9 @@ with tab2:
         st.dataframe(pd.DataFrame(live_trades_b), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("📊 TW Original (2-Bar Lag)")
+    st.subheader("📊 TW Original (2-Bar Lag, 5m Scalp)")
     pair_b = st.selectbox("Select Asset Pair (Strategy B):", PAIRS, key="pair_b")
-    df_chart_b = fetch_live_data(pair_b, "15m", 120)
+    df_chart_b = fetch_live_data(pair_b, "5m", 120)
 
     if not df_chart_b.empty and len(df_chart_b) >= 105:
         df_chart_b['EMA100'] = df_chart_b['close'].ewm(span=100, adjust=False).mean()
@@ -630,7 +622,7 @@ with tab2:
         df_chart_b['SHULL'] = df_chart_b['MHULL'].shift(2)
 
         fig_b = go.Figure()
-        fig_b.add_trace(go.Candlestick(x=df_chart_b.index, open=df_chart_b['open'], high=df_chart_b['high'], low=df_chart_b['low'], close=df_chart_b['close'], name="15m Candles"))
+        fig_b.add_trace(go.Candlestick(x=df_chart_b.index, open=df_chart_b['open'], high=df_chart_b['high'], low=df_chart_b['low'], close=df_chart_b['close'], name="5m Candles"))
         fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['MHULL'], line=dict(color='#0018F3', width=2), name="MHULL"))
         fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['SHULL'], line=dict(color='#FF4B4B', width=1.5, dash='dot'), name="SHULL (2 Lag)"))
         fig_b.add_trace(go.Scatter(x=df_chart_b.index, y=df_chart_b['EMA100'], line=dict(color='#9C27B0', width=2), name="EMA 100"))
@@ -686,9 +678,9 @@ with tab3:
         st.dataframe(pd.DataFrame(live_trades_c), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.subheader("📊 TW Fine-Tuned (3-Bar Lag + ATR Volatility Filter)")
+    st.subheader("📊 TW Fine-Tuned (3-Bar Lag, 5m Scalp)")
     pair_c = st.selectbox("Select Asset Pair (Strategy C):", PAIRS, key="pair_c")
-    df_chart_c = fetch_live_data(pair_c, "15m", 120)
+    df_chart_c = fetch_live_data(pair_c, "5m", 120)
 
     if not df_chart_c.empty and len(df_chart_c) >= 105:
         df_chart_c['EMA100'] = df_chart_c['close'].ewm(span=100, adjust=False).mean()
@@ -696,7 +688,7 @@ with tab3:
         df_chart_c['SHULL'] = df_chart_c['MHULL'].shift(3) 
 
         fig_c = go.Figure()
-        fig_c.add_trace(go.Candlestick(x=df_chart_c.index, open=df_chart_c['open'], high=df_chart_c['high'], low=df_chart_c['low'], close=df_chart_c['close'], name="15m Candles"))
+        fig_c.add_trace(go.Candlestick(x=df_chart_c.index, open=df_chart_c['open'], high=df_chart_c['high'], low=df_chart_c['low'], close=df_chart_c['close'], name="5m Candles"))
         fig_c.add_trace(go.Scatter(x=df_chart_c.index, y=df_chart_c['MHULL'], line=dict(color='#0018F3', width=2), name="MHULL"))
         fig_c.add_trace(go.Scatter(x=df_chart_c.index, y=df_chart_c['SHULL'], line=dict(color='#00E676', width=1.5, dash='dot'), name="SHULL (3 Lag)"))
         fig_c.add_trace(go.Scatter(x=df_chart_c.index, y=df_chart_c['EMA100'], line=dict(color='#9C27B0', width=2), name="EMA 100"))
@@ -743,7 +735,6 @@ with tab4:
             df_proj['New_Net_USD'] = df_proj['Gross_USD'] - df_proj['Fees_USD'] - df_proj['Slippage_USD']
             df_proj['New_Net_INR'] = df_proj['New_Net_USD'] * USDT_INR_RATE 
             
-            # EVOLUTION FIX: Physically remove the avoided trades from the dataset so trade count drops
             short_loss_mask = (df_proj['Side'] == 'SHORT') & (df_proj['Reason'] == 'Stop Market') & (df_proj['New_Net_INR'] < 0)
             bad_shorts = df_proj[short_loss_mask]
             drop_count = int(len(bad_shorts) * short_save)
