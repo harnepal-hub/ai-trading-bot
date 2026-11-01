@@ -23,7 +23,7 @@ USDT_INR_RATE = 86.00
 MAKER_FEE = 0.00025  
 TAKER_FEE = 0.00050  
 SLIPPAGE_RATE = 0.0005 
-SLIPPAGE_BUFFER = 0.0005 # V2.1 Fix: Ensures Breakevens are mathematically positive
+SLIPPAGE_BUFFER = 0.0005 
 
 AMTE_LEDGER = "amte_v2_ledger.csv"
 TW_LEDGER = "tw_v2_ledger.csv"
@@ -86,7 +86,7 @@ def calculate_pivots(df, left=33, right=21, quick_right=3):
     return last_p_high, last_p_low, last_q_high, last_q_low
 
 # ==========================================
-# STRATEGY 1: AMTE BB PULLBACK (15M)
+# STRATEGY 1: AMTE BB PULLBACK (OPTIMIZED V2.2)
 # ==========================================
 class AMTEBot:
     def __init__(self, pairs):
@@ -177,20 +177,23 @@ class AMTEBot:
             risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
             atr = c_micro['ATR']
             
+            # Optimized V2.2: Tighter stop loss for BTC (1.5x ATR) to cap bleeding, standard 2.0x for Altcoins
+            sl_multiplier = 1.5 if pair == "B-BTC_USDT" else 2.0
+
             if is_bull and live_price > c_micro['BBL']:
-                # V2.1 Fix: Dual Macro Filter protects Longs
                 if live_price > df_macro.iloc[-1]['EMA_50']:
                     lp = c_micro['BBL']
-                    sl, tp = lp - (atr * 2.0), lp + (atr * 4.0)
+                    sl, tp = lp - (atr * sl_multiplier), lp + (atr * (sl_multiplier * 2.0))
                     self.place_limit(pair, 'LONG', lp, sl, tp, risk_usd / max(0.0001, (lp - sl)), atr)
             elif is_bear and live_price < c_micro['BBU']:
                 if live_price < df_macro.iloc[-1]['EMA_50']:
                     lp = c_micro['BBU']
-                    sl, tp = lp + (atr * 2.0), lp - (atr * 4.0)
+                    sl, tp = lp + (atr * sl_multiplier), lp - (atr * (sl_multiplier * 2.0))
                     self.place_limit(pair, 'SHORT', lp, sl, tp, risk_usd / max(0.0001, (sl - lp)), atr)
 
     def place_limit(self, pair, side, lp, sl, tp, size, atr):
-        be_trig = lp + (atr * 1.0) if side == 'LONG' else lp - (atr * 1.0)
+        # V2.2 Optimization: Widened breakeven trigger to 2.0x ATR so altcoin wins run longer
+        be_trig = lp + (atr * 2.0) if side == 'LONG' else lp - (atr * 2.0)
         cost_buf = lp * ((MAKER_FEE * 2) + TAKER_FEE + SLIPPAGE_BUFFER)
         self.positions[pair] = {
             'status': 'PENDING_ENTRY', 'side': side, 'limit_price': lp, 'sl': sl, 'tp': tp, 
@@ -312,12 +315,12 @@ class TWAllInOneBot:
                 if live_price > df_macro.iloc[-1]['EMA50']:
                     sl = q_low if (not np.isnan(q_low) and q_low < live_price) else (live_price - atr * 1.8)
                     tp = p_high if (not np.isnan(p_high) and p_high > live_price) else (live_price + atr * 3.6)
-                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0, 'be_trig': live_price + (atr * 1.0), 'be_sl': live_price + cost_buf, 'be_moved': False}
+                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0, 'be_trig': live_price + (atr * 2.0), 'be_sl': live_price + cost_buf, 'be_moved': False}
             elif sell_signal:
                 if live_price < df_macro.iloc[-1]['EMA50']:
                     sl = q_high if (not np.isnan(q_high) and q_high > live_price) else (live_price + atr * 1.8)
                     tp = p_low if (not np.isnan(p_low) and p_low < live_price) else (live_price - atr * 3.6)
-                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (sl - live_price)), 'max_dd_inr': 0.0, 'be_trig': live_price - (atr * 1.0), 'be_sl': live_price - cost_buf, 'be_moved': False}
+                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (sl - live_price)), 'max_dd_inr': 0.0, 'be_trig': live_price - (atr * 2.0), 'be_sl': live_price - cost_buf, 'be_moved': False}
 
     def activate_trade(self, pair):
         self.positions[pair].update({'status': 'ACTIVE', 'entry_time': datetime.now(), 'max_dd_inr': 0.0})
@@ -439,12 +442,12 @@ class TWTunedBot:
                 if live_price > df_macro.iloc[-1]['EMA50']:
                     sl = q_low if (not np.isnan(q_low) and q_low < live_price) else (live_price - atr * 1.8)
                     tp = p_high if (not np.isnan(p_high) and p_high > live_price) else (live_price + atr * 3.6)
-                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0, 'be_trig': live_price + (atr * 1.0), 'be_sl': live_price + cost_buf, 'be_moved': False}
+                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0, 'be_trig': live_price + (atr * 2.0), 'be_sl': live_price + cost_buf, 'be_moved': False}
             elif sell_signal:
                 if live_price < df_macro.iloc[-1]['EMA50']:
                     sl = q_high if (not np.isnan(q_high) and q_high > live_price) else (live_price + atr * 1.8)
                     tp = p_low if (not np.isnan(p_low) and p_low < live_price) else (live_price - atr * 3.6)
-                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (sl - live_price)), 'max_dd_inr': 0.0, 'be_trig': live_price - (atr * 1.0), 'be_sl': live_price - cost_buf, 'be_moved': False}
+                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (sl - live_price)), 'max_dd_inr': 0.0, 'be_trig': live_price - (atr * 2.0), 'be_sl': live_price - cost_buf, 'be_moved': False}
 
     def activate_trade(self, pair):
         self.positions[pair].update({'status': 'ACTIVE', 'entry_time': datetime.now(), 'max_dd_inr': 0.0})
@@ -502,7 +505,7 @@ master = start_master_engine()
 # ==========================================
 st.set_page_config(page_title="AMTE Quantitative Terminal", layout="wide")
 st.title("⚡ AMTE Quantitative Multi-Model Terminal")
-st.caption("Engine is actively running in the background. 🛡️ 15m Scalp Mode | Dual Macro Filter Active.")
+st.caption("Engine is actively running in the background. 🛡️ 15m Scalp Mode | V2.2 Optimized.")
 
 tab1, tab2, tab3, tab4 = st.tabs(["⚡ Strategy A: AMTE BB Pullback", "🎯 Strategy B: TW Original", "🛠️ Strategy C: TW Fine-Tuned", "🧬 Evolution Analytics"])
 
@@ -640,7 +643,7 @@ with tab2:
         st.dataframe(df_tw_led.sort_index(ascending=False), use_container_width=True)
 
 # ------------------------------------------
-# TAB 3: TW FINE-TUNED (STRATEGY C)
+# STRATEGY 3: TW FINE-TUNED (STRATEGY C)
 # ------------------------------------------
 with tab3:
     df_tuned_led = pd.read_csv(TW_TUNED_LEDGER) if os.path.exists(TW_TUNED_LEDGER) else pd.DataFrame()
