@@ -86,7 +86,7 @@ def calculate_pivots(df, left=33, right=21, quick_right=3):
     return last_p_high, last_p_low, last_q_high, last_q_low
 
 # ==========================================
-# STRATEGY 1: AMTE BB PULLBACK (OPTIMIZED V2.2)
+# STRATEGY 1: AMTE BB PULLBACK (V2.3 ASYMMETRIC R:R)
 # ==========================================
 class AMTEBot:
     def __init__(self, pairs):
@@ -146,15 +146,10 @@ class AMTEBot:
                 floating_fees = (ep * pos['size'] * MAKER_FEE) + (live_price * pos['size'] * TAKER_FEE)
                 self.positions[pair]['max_dd_inr'] = min(pos.get('max_dd_inr', 0.0), (floating_usd - floating_fees) * USDT_INR_RATE)
 
-                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 4:
+                if (datetime.now() - pos['entry_time']).total_seconds() / 3600 >= 6:
                     if (floating_usd - floating_fees) > 0:
                         self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
                         continue
-                
-                if not pos.get('be_moved', False):
-                    if (pos['side'] == 'LONG' and live_price >= pos['be_trig']) or (pos['side'] == 'SHORT' and live_price <= pos['be_trig']):
-                        self.positions[pair]['sl'] = pos['be_sl']
-                        self.positions[pair]['be_moved'] = True
                         
                 if pos['side'] == 'LONG':
                     if live_price <= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
@@ -177,28 +172,25 @@ class AMTEBot:
             risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
             atr = c_micro['ATR']
             
-            # Optimized V2.2: Tighter stop loss for BTC (1.5x ATR) to cap bleeding, standard 2.0x for Altcoins
-            sl_multiplier = 1.5 if pair == "B-BTC_USDT" else 2.0
+            # V2.3: Strict Risk Control. BTC gets 1.2x ATR stop, Altcoins get 2.0x ATR, with 2.5x Reward target.
+            sl_mult = 1.2 if pair == "B-BTC_USDT" else 2.0
+            tp_mult = sl_mult * 2.5 # Ensures wins are always significantly larger than losses
 
             if is_bull and live_price > c_micro['BBL']:
                 if live_price > df_macro.iloc[-1]['EMA_50']:
                     lp = c_micro['BBL']
-                    sl, tp = lp - (atr * sl_multiplier), lp + (atr * (sl_multiplier * 2.0))
-                    self.place_limit(pair, 'LONG', lp, sl, tp, risk_usd / max(0.0001, (lp - sl)), atr)
+                    sl, tp = lp - (atr * sl_mult), lp + (atr * tp_mult)
+                    self.place_limit(pair, 'LONG', lp, sl, tp, risk_usd / max(0.0001, (lp - sl)))
             elif is_bear and live_price < c_micro['BBU']:
                 if live_price < df_macro.iloc[-1]['EMA_50']:
                     lp = c_micro['BBU']
-                    sl, tp = lp + (atr * sl_multiplier), lp - (atr * (sl_multiplier * 2.0))
-                    self.place_limit(pair, 'SHORT', lp, sl, tp, risk_usd / max(0.0001, (sl - lp)), atr)
+                    sl, tp = lp + (atr * sl_mult), lp - (atr * tp_mult)
+                    self.place_limit(pair, 'SHORT', lp, sl, tp, risk_usd / max(0.0001, (sl - lp)))
 
-    def place_limit(self, pair, side, lp, sl, tp, size, atr):
-        # V2.2 Optimization: Widened breakeven trigger to 2.0x ATR so altcoin wins run longer
-        be_trig = lp + (atr * 2.0) if side == 'LONG' else lp - (atr * 2.0)
-        cost_buf = lp * ((MAKER_FEE * 2) + TAKER_FEE + SLIPPAGE_BUFFER)
+    def place_limit(self, pair, side, lp, sl, tp, size):
         self.positions[pair] = {
             'status': 'PENDING_ENTRY', 'side': side, 'limit_price': lp, 'sl': sl, 'tp': tp, 
-            'size': size, 'be_trig': be_trig, 'be_sl': lp + cost_buf if side == 'LONG' else lp - cost_buf, 
-            'be_moved': False, 'max_dd_inr': 0.0
+            'size': size, 'max_dd_inr': 0.0
         }
 
     def activate_trade(self, pair):
@@ -285,11 +277,6 @@ class TWAllInOneBot:
                     if (floating_usd - floating_fees) > 0:
                         self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
                         continue
-                        
-                if not pos.get('be_moved', False):
-                    if (pos['side'] == 'LONG' and live_price >= pos['be_trig']) or (pos['side'] == 'SHORT' and live_price <= pos['be_trig']):
-                        self.positions[pair]['sl'] = pos['be_sl']
-                        self.positions[pair]['be_moved'] = True
 
                 if pos['side'] == 'LONG':
                     if live_price <= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
@@ -309,18 +296,17 @@ class TWAllInOneBot:
             p_high, p_low, q_high, q_low = calculate_pivots(df)
             atr = c_curr['ATR']
             risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
-            cost_buf = live_price * ((MAKER_FEE * 2) + TAKER_FEE + SLIPPAGE_BUFFER)
 
             if buy_signal:
                 if live_price > df_macro.iloc[-1]['EMA50']:
                     sl = q_low if (not np.isnan(q_low) and q_low < live_price) else (live_price - atr * 1.8)
                     tp = p_high if (not np.isnan(p_high) and p_high > live_price) else (live_price + atr * 3.6)
-                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0, 'be_trig': live_price + (atr * 2.0), 'be_sl': live_price + cost_buf, 'be_moved': False}
+                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0}
             elif sell_signal:
                 if live_price < df_macro.iloc[-1]['EMA50']:
                     sl = q_high if (not np.isnan(q_high) and q_high > live_price) else (live_price + atr * 1.8)
                     tp = p_low if (not np.isnan(p_low) and p_low < live_price) else (live_price - atr * 3.6)
-                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (sl - live_price)), 'max_dd_inr': 0.0, 'be_trig': live_price - (atr * 2.0), 'be_sl': live_price - cost_buf, 'be_moved': False}
+                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (sl - live_price)), 'max_dd_inr': 0.0}
 
     def activate_trade(self, pair):
         self.positions[pair].update({'status': 'ACTIVE', 'entry_time': datetime.now(), 'max_dd_inr': 0.0})
@@ -412,11 +398,6 @@ class TWTunedBot:
                     if (floating_usd - floating_fees) > 0:
                         self.close_trade(pair, live_price, "Timeout (Profit)", "TAKER")
                         continue
-                        
-                if not pos.get('be_moved', False):
-                    if (pos['side'] == 'LONG' and live_price >= pos['be_trig']) or (pos['side'] == 'SHORT' and live_price <= pos['be_trig']):
-                        self.positions[pair]['sl'] = pos['be_sl']
-                        self.positions[pair]['be_moved'] = True
 
                 if pos['side'] == 'LONG':
                     if live_price <= pos['sl']: self.close_trade(pair, pos['sl'], "Stop Market", "TAKER")
@@ -436,18 +417,17 @@ class TWTunedBot:
             p_high, p_low, q_high, q_low = calculate_pivots(df)
             atr = c_curr['ATR']
             risk_usd = RISK_PER_TRADE_INR / USDT_INR_RATE
-            cost_buf = live_price * ((MAKER_FEE * 2) + TAKER_FEE + SLIPPAGE_BUFFER)
 
             if buy_signal:
                 if live_price > df_macro.iloc[-1]['EMA50']:
                     sl = q_low if (not np.isnan(q_low) and q_low < live_price) else (live_price - atr * 1.8)
                     tp = p_high if (not np.isnan(p_high) and p_high > live_price) else (live_price + atr * 3.6)
-                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0, 'be_trig': live_price + (atr * 2.0), 'be_sl': live_price + cost_buf, 'be_moved': False}
+                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'LONG', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (live_price - sl)), 'max_dd_inr': 0.0}
             elif sell_signal:
                 if live_price < df_macro.iloc[-1]['EMA50']:
                     sl = q_high if (not np.isnan(q_high) and q_high > live_price) else (live_price + atr * 1.8)
                     tp = p_low if (not np.isnan(p_low) and p_low < live_price) else (live_price - atr * 3.6)
-                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (sl - live_price)), 'max_dd_inr': 0.0, 'be_trig': live_price - (atr * 2.0), 'be_sl': live_price - cost_buf, 'be_moved': False}
+                    self.positions[pair] = {'status': 'PENDING_ENTRY', 'side': 'SHORT', 'limit_price': live_price, 'sl': sl, 'tp': tp, 'size': risk_usd / max(0.0001, (sl - live_price)), 'max_dd_inr': 0.0}
 
     def activate_trade(self, pair):
         self.positions[pair].update({'status': 'ACTIVE', 'entry_time': datetime.now(), 'max_dd_inr': 0.0})
@@ -472,7 +452,7 @@ class TWTunedBot:
         self.positions[pair] = {'status': 'NONE'}
 
 # ==========================================
-# MASTER CONTINUOUS ENGINE RUNNER
+# MASTER CONTINUOUS ENGINE RUNNER (V2.3 CREDIT SAVER)
 # ==========================================
 class MasterEngine:
     def __init__(self):
@@ -481,15 +461,16 @@ class MasterEngine:
         self.tw_tuned = TWTunedBot(PAIRS)
 
     def loop(self):
-        time.sleep(5)
+        time.sleep(10)
         while True:
             try:
                 self.amte.process_cycle()
                 self.tw_orig.process_cycle()
                 self.tw_tuned.process_cycle()
-                time.sleep(60)
+                # V2.3 Optimization: Increased sleep from 60s to 120s to cut Render CPU/API usage by 50%
+                time.sleep(120)
             except:
-                time.sleep(60)
+                time.sleep(120)
 
 @st.cache_resource
 def start_master_engine():
@@ -505,7 +486,7 @@ master = start_master_engine()
 # ==========================================
 st.set_page_config(page_title="AMTE Quantitative Terminal", layout="wide")
 st.title("⚡ AMTE Quantitative Multi-Model Terminal")
-st.caption("Engine is actively running in the background. 🛡️ 15m Scalp Mode | V2.2 Optimized.")
+st.caption("Engine is actively running in the background. 🛡️ 15m Scalp Mode | V2.3 Asymmetric R:R + Credit Saver.")
 
 tab1, tab2, tab3, tab4 = st.tabs(["⚡ Strategy A: AMTE BB Pullback", "🎯 Strategy B: TW Original", "🛠️ Strategy C: TW Fine-Tuned", "🧬 Evolution Analytics"])
 
