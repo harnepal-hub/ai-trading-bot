@@ -686,7 +686,7 @@ def render_strategy_tab(bot, ledger_file, label_prefix, key_suffix):
             fig.add_hline(y=pos_sel['tp'], line_dash="dash", line_color="#00E676", annotation_text="TP")
             fig.add_hline(y=pos_sel['sl'], line_dash="dash", line_color="#FF5252", annotation_text="SL")
         fig.update_layout(height=420, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, key=f"chart_{key_suffix}", width="stretch")
 
     if not df_led.empty:
         st.download_button(
